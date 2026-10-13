@@ -40,7 +40,12 @@ impl MutationRoot {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let attachments = match attachments::resolve(&client, attachments.unwrap_or_default()).await
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
         {
             Ok(a) => a,
             Err(msg) => return Ok(failed(msg)),
@@ -147,7 +152,12 @@ impl MutationRoot {
         let reply_all = all.unwrap_or(false);
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let attachments = match attachments::resolve(&client, attachments.unwrap_or_default()).await
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
         {
             Ok(a) => a,
             Err(msg) => return Ok(failed(msg)),
@@ -299,7 +309,12 @@ impl MutationRoot {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let mut client = client.lock().await;
-        let attachments = match attachments::resolve(&client, attachments.unwrap_or_default()).await
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
         {
             Ok(a) => a,
             Err(msg) => return Ok(failed(msg)),
@@ -428,13 +443,11 @@ impl MutationRoot {
         >,
         #[graphql(desc = "The file's bytes, base64-encoded")] base64: String,
     ) -> Result<GqlUploadedAttachment> {
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let client = client.lock().await;
-        let content_type = content_type
-            .filter(|t| !t.trim().is_empty())
-            .unwrap_or_else(|| crate::util::mime_from_filename(&name));
+        let (name, content_type) = attachments::name_and_type(name, content_type)?;
         let bytes = attachments::decode(&name, &base64, attachments::MAX_ATTACHMENT_BYTES)?;
         let size = bytes.len() as u64;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let client = client.lock().await;
         let blob_id = client.upload_blob(bytes, &content_type).await?;
         Ok(GqlUploadedAttachment {
             blob_id,
@@ -469,7 +482,7 @@ impl MutationRoot {
         let client = client.lock().await;
         let draft = client.get_email(&email_id).await?;
         let attachments = match attachments {
-            Some(inputs) => match attachments::resolve(&client, inputs).await {
+            Some(inputs) => match attachments::resolve(&client, inputs, true).await {
                 Ok(a) => Some(a.into_iter().map(|a| a.data).collect()),
                 Err(msg) => return Ok(failed(msg)),
             },

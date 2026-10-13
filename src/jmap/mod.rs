@@ -1469,6 +1469,28 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        let bytes = self.fetch_blob(blob_id).await?.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
+    /// A blob's size, read no further than `limit` bytes: past that, `limit + 1`.
+    /// Fastmail does not offer `Blob/get`, so this is a download, ended early.
+    pub async fn blob_size(&self, blob_id: &str, limit: usize) -> Result<usize> {
+        let mut resp = self.fetch_blob(blob_id).await?;
+        if let Some(len) = resp.content_length() {
+            return Ok(usize::try_from(len).unwrap_or(usize::MAX));
+        }
+        let mut size = 0;
+        while let Some(chunk) = resp.chunk().await? {
+            size += chunk.len();
+            if size > limit {
+                return Ok(limit + 1);
+            }
+        }
+        Ok(size)
+    }
+
+    async fn fetch_blob(&self, blob_id: &str) -> Result<reqwest::Response> {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
@@ -1499,11 +1521,14 @@ impl JmapClient {
             404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
+            200..=299 => {}
+            code => {
+                return Err(Error::Server(format!(
+                    "Download of blob {blob_id} failed ({code})"
+                )));
+            }
         }
-
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+        Ok(resp)
     }
 
     /// Upload whatever attachments are still bytes; blobs pass through as they are.
@@ -1743,7 +1768,12 @@ impl JmapClient {
             })
             .collect();
         if let Some(replacements) = edit.attachments {
-            attachments.retain(|a| a.inline_cid.is_some());
+            attachments.retain(|a| {
+                a.inline_cid.as_ref().is_some_and(|cid| {
+                    html.as_deref()
+                        .is_some_and(|h| h.contains(&format!("cid:{cid}")))
+                })
+            });
             attachments.extend(self.upload_attachments(replacements).await?);
         }
 

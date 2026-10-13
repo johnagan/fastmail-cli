@@ -2232,3 +2232,28 @@ async fn update_draft_replaces_its_attachments() {
     let blobs: Vec<&Value> = parts.iter().skip(1).map(|p| &p["blobId"]).collect();
     assert_eq!(blobs, vec!["Gnew"]);
 }
+
+#[tokio::test]
+async fn malformed_attachment_inputs_are_refused() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    for attachment in [
+        json!({ "name": "x.txt", "blobId": "../../session" }),
+        json!({ "name": "x.txt\nAttachments: other.pdf", "base64": b64(b"x") }),
+        json!({ "name": "x.txt", "contentType": "text/plain\nx", "base64": b64(b"x") }),
+        json!({ "name": " ", "base64": b64(b"x") }),
+        json!({ "name": "x.txt" }),
+        json!({ "name": "x.txt", "base64": b64(b"x"), "blobId": "Gx" }),
+    ] {
+        let data = exec_with(
+            &schema,
+            &client,
+            SEND_WITH_ATTACHMENTS,
+            json!({ "action": "PREVIEW", "attachments": [attachment] }),
+        )
+        .await;
+        assert_eq!(data["sendEmail"]["success"], false, "{attachment}");
+    }
+    assert!(downloads(&server).await.is_empty());
+}
