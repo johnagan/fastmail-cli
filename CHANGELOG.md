@@ -4,7 +4,8 @@
 
 ### Added
 
-- **Attachments over MCP.** `sendEmail`, `replyToEmail`, `forwardEmail` and
+- **Attachments over MCP**
+  ([#76](https://github.com/radiosilence/fastmail-cli/pull/76)). `sendEmail`, `replyToEmail`, `forwardEmail` and
   `updateDraft` take `attachments: [AttachmentInput!]`, each one either inline
   `base64` or the `blobId` of a blob already on the server. The server usually
   runs remotely, so a client cannot name a local file the way `fastmail send -a`

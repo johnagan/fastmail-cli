@@ -401,7 +401,7 @@ mod tests {
             tmp.path().file_name().unwrap().to_str().unwrap()
         );
         assert_eq!(att.content_type, "application/pdf");
-        assert_eq!(att.data, b"fake pdf");
+        assert!(matches!(att.content, AttachmentContent::Bytes(ref b) if b == b"fake pdf"));
     }
 
     #[test]
