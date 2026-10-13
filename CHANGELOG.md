@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **Inline attachments are fingerprinted with SHA-256.** The confirmation token
+  keyed inline attachment bytes by the standard library's 64-bit hash, whose
+  fixed keys put a deliberate collision within reach of a client that chooses
+  the bytes. A CONFIRM could then have carried different content under the
+  same token.
+
 ## [3.7.0] - 2026-10-13
 
 ### Added
