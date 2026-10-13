@@ -254,6 +254,18 @@ async fn mock_server(count: usize) -> MockServer {
         .mount(&server)
         .await;
 
+    Mock::given(method("POST"))
+        .and(path("/jmap/upload"))
+        .respond_with(|req: &wiremock::Request| {
+            ResponseTemplate::new(201).set_body_json(json!({
+                "accountId": "acct1",
+                "blobId": format!("Gup{}", req.body.len()),
+                "size": req.body.len(),
+            }))
+        })
+        .mount(&server)
+        .await;
+
     // The session handshake, which `session` re-runs. Mounted ahead of the
     // catch-all GET so it is not answered with blob bytes.
     Mock::given(method("GET"))
@@ -1964,4 +1976,284 @@ async fn delete_draft_moves_it_to_trash() {
         sets[0]["update"]["draft1"]["mailboxIds"],
         json!({ "mbT": true })
     );
+}
+
+// ============ Attachments ============
+
+/// Bodies of every blob upload, in order.
+async fn uploads(server: &MockServer) -> Vec<Vec<u8>> {
+    server
+        .received_requests()
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|r| r.method == wiremock::http::Method::POST && r.url.path() == "/jmap/upload")
+        .map(|r| r.body)
+        .collect()
+}
+
+async fn exec_with(
+    schema: &super::FastmailSchema,
+    client: &SharedClient,
+    query: &str,
+    variables: Value,
+) -> Value {
+    let resp = schema
+        .execute(
+            request(query, client.clone(), CardDavCreds::default())
+                .variables(async_graphql::Variables::from_json(variables)),
+        )
+        .await;
+    assert!(resp.errors.is_empty(), "{:?}", resp.errors);
+    resp.data.into_json().unwrap()
+}
+
+const SEND_WITH_ATTACHMENTS: &str = "mutation($action: SendAction!, \
+    $attachments: [AttachmentInput!], $token: String) { \
+    sendEmail(action: $action, to: \"a@b.com\", subject: \"s\", body: \"b\", \
+      attachments: $attachments, confirmationToken: $token) \
+    { success emailId preview confirmationToken error } }";
+
+fn b64(bytes: &[u8]) -> String {
+    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes)
+}
+
+#[tokio::test]
+async fn preview_lists_attachment_names_and_sizes() {
+    let server = mock_server(1).await;
+    let data = exec_with(
+        &build_schema(),
+        &client_for(&server),
+        SEND_WITH_ATTACHMENTS,
+        json!({
+            "action": "PREVIEW",
+            "attachments": [
+                { "name": "report.pdf", "base64": b64(&[0u8; 2048]) },
+                { "name": "notes.txt", "blobId": "Gexisting" },
+            ],
+        }),
+    )
+    .await;
+    let preview = data["sendEmail"]["preview"].as_str().unwrap();
+    assert!(
+        preview.contains("report.pdf (application/pdf, 2.0 KB)"),
+        "{preview}"
+    );
+    assert!(
+        preview.contains("notes.txt (text/plain, 18 B)"),
+        "{preview}"
+    );
+    assert!(
+        preview.find("Attachments:") < preview.find("To send:"),
+        "attachments belong above the instructions: {preview}"
+    );
+    // Previewing uploads nothing; the blob was only measured.
+    assert!(uploads(&server).await.is_empty());
+    assert!(call_args(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn confirm_rejects_attachments_the_preview_did_not_show() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    let shown = json!([{ "name": "a.txt", "base64": b64(b"shown") }]);
+
+    for changed in [
+        json!([]),
+        json!([{ "name": "a.txt", "base64": b64(b"swapped") }]),
+        json!([{ "name": "b.txt", "base64": b64(b"shown") }]),
+        json!([{ "name": "a.txt", "contentType": "application/x-evil", "base64": b64(b"shown") }]),
+        json!([{ "name": "a.txt", "blobId": "Gother" }]),
+        json!([
+            { "name": "a.txt", "base64": b64(b"shown") },
+            { "name": "extra.txt", "base64": b64(b"more") },
+        ]),
+    ] {
+        let preview = exec_with(
+            &schema,
+            &client,
+            SEND_WITH_ATTACHMENTS,
+            json!({ "action": "PREVIEW", "attachments": shown }),
+        )
+        .await;
+        let token = preview["sendEmail"]["confirmationToken"].clone();
+        let confirm = exec_with(
+            &schema,
+            &client,
+            SEND_WITH_ATTACHMENTS,
+            json!({ "action": "CONFIRM", "attachments": changed, "token": token }),
+        )
+        .await;
+        assert_eq!(confirm["sendEmail"]["success"], false, "{changed}");
+        assert!(
+            confirm["sendEmail"]["error"]
+                .as_str()
+                .unwrap()
+                .contains("changed"),
+            "{confirm}"
+        );
+    }
+    assert!(uploads(&server).await.is_empty());
+    assert!(call_args(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn confirmed_attachments_become_parts_of_a_multipart_message() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    let attachments = json!([
+        { "name": "photo.png", "base64": b64(b"png bytes") },
+        { "name": "kept.pdf", "contentType": "application/pdf", "blobId": "Gexisting" },
+    ]);
+
+    let preview = exec_with(
+        &schema,
+        &client,
+        SEND_WITH_ATTACHMENTS,
+        json!({ "action": "PREVIEW", "attachments": attachments }),
+    )
+    .await;
+    let token = preview["sendEmail"]["confirmationToken"].clone();
+    let confirm = exec_with(
+        &schema,
+        &client,
+        SEND_WITH_ATTACHMENTS,
+        json!({ "action": "CONFIRM", "attachments": attachments, "token": token }),
+    )
+    .await;
+    assert_eq!(confirm["sendEmail"]["success"], true, "{confirm}");
+
+    // Only the inline file is uploaded; the blob is referenced as it stands.
+    assert_eq!(uploads(&server).await, vec![b"png bytes".to_vec()]);
+
+    let sets = call_args(&server, "Email/set").await;
+    let structure = &sets[0]["create"]["email"]["bodyStructure"];
+    assert_eq!(structure["type"], "multipart/mixed", "{}", sets[0]);
+    let parts = structure["subParts"].as_array().unwrap();
+    assert_eq!(parts.len(), 3);
+    assert_eq!(parts[0]["partId"], "textBody");
+    assert_eq!(
+        parts[1],
+        json!({ "blobId": "Gup9", "name": "photo.png", "type": "image/png",
+                "disposition": "attachment" })
+    );
+    assert_eq!(
+        parts[2],
+        json!({ "blobId": "Gexisting", "name": "kept.pdf", "type": "application/pdf",
+                "disposition": "attachment" })
+    );
+}
+
+#[tokio::test]
+async fn attachments_over_the_cap_are_refused_before_anything_is_sent() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    let half = b64(&vec![0u8; super::attachments::MAX_ATTACHMENT_BYTES / 2 + 1]);
+
+    for action in ["PREVIEW", "DRAFT"] {
+        let data = exec_with(
+            &schema,
+            &client,
+            SEND_WITH_ATTACHMENTS,
+            json!({
+                "action": action,
+                "attachments": [
+                    { "name": "one.bin", "base64": half },
+                    { "name": "two.bin", "base64": half },
+                ],
+            }),
+        )
+        .await;
+        assert_eq!(data["sendEmail"]["success"], false);
+        let error = data["sendEmail"]["error"].as_str().unwrap();
+        assert!(error.contains("over the 25.0 MB limit"), "{error}");
+    }
+
+    let resp = schema
+        .execute(
+            request(
+                "mutation($b: String!) { uploadAttachment(name: \"big.bin\", base64: $b) \
+                 { blobId } }",
+                client.clone(),
+                CardDavCreds::default(),
+            )
+            .variables(async_graphql::Variables::from_json(json!({
+                "b": b64(&vec![0u8; super::attachments::MAX_ATTACHMENT_BYTES + 1]),
+            }))),
+        )
+        .await;
+    assert!(
+        resp.errors
+            .iter()
+            .any(|e| e.message.contains("over the 25.0 MB limit")),
+        "{:?}",
+        resp.errors
+    );
+
+    assert!(uploads(&server).await.is_empty());
+    assert!(call_args(&server, "Email/set").await.is_empty());
+}
+
+#[tokio::test]
+async fn upload_attachment_returns_a_blob_to_attach_by() {
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { uploadAttachment(name: \"notes.txt\", base64: \"aGVsbG8=\") \
+         { blobId name contentType size } }",
+    )
+    .await;
+    assert_eq!(
+        data["uploadAttachment"],
+        json!({ "blobId": "Gup5", "name": "notes.txt", "contentType": "text/plain", "size": 5 })
+    );
+    assert_eq!(uploads(&server).await, vec![b"hello".to_vec()]);
+}
+
+#[tokio::test]
+async fn update_draft_replaces_its_attachments() {
+    let server = mock_server(1).await;
+    let data = exec(
+        &build_schema(),
+        &client_for(&server),
+        "mutation { updateDraft(emailId: \"draft1\", \
+           attachments: [{ name: \"new.txt\", blobId: \"Gnew\" }]) { success error } }",
+    )
+    .await;
+    assert_eq!(data["updateDraft"]["success"], true, "{data}");
+    let sets = call_args(&server, "Email/set").await;
+    let parts = sets[0]["create"]["email"]["bodyStructure"]["subParts"]
+        .as_array()
+        .unwrap();
+    let blobs: Vec<&Value> = parts.iter().skip(1).map(|p| &p["blobId"]).collect();
+    assert_eq!(blobs, vec!["Gnew"]);
+}
+
+#[tokio::test]
+async fn malformed_attachment_inputs_are_refused() {
+    let server = mock_server(1).await;
+    let client = client_for(&server);
+    let schema = build_schema();
+    for attachment in [
+        json!({ "name": "x.txt", "blobId": "../../session" }),
+        json!({ "name": "x.txt\nAttachments: other.pdf", "base64": b64(b"x") }),
+        json!({ "name": "x.txt", "contentType": "text/plain\nx", "base64": b64(b"x") }),
+        json!({ "name": " ", "base64": b64(b"x") }),
+        json!({ "name": "x.txt" }),
+        json!({ "name": "x.txt", "base64": b64(b"x"), "blobId": "Gx" }),
+    ] {
+        let data = exec_with(
+            &schema,
+            &client,
+            SEND_WITH_ATTACHMENTS,
+            json!({ "action": "PREVIEW", "attachments": [attachment] }),
+        )
+        .await;
+        assert_eq!(data["sendEmail"]["success"], false, "{attachment}");
+    }
+    assert!(downloads(&server).await.is_empty());
 }

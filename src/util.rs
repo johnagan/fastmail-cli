@@ -1,4 +1,4 @@
-use crate::jmap::AttachmentData;
+use crate::jmap::{AttachmentContent, AttachmentData};
 use crate::models::EmailAddress;
 use std::path::Path;
 
@@ -76,7 +76,7 @@ fn is_image_extension(filename: &str) -> bool {
     )
 }
 
-/// Infer MIME type from filename extension for documents
+/// Infer MIME type from filename extension
 pub fn mime_from_filename(filename: &str) -> String {
     let ext = Path::new(filename)
         .extension()
@@ -119,6 +119,15 @@ pub fn mime_from_filename(filename: &str) -> String {
         "toml" => "application/toml",
         "rst" => "text/x-rst",
         "org" => "text/x-org",
+        // Images
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "ico" => "image/vnd.microsoft.icon",
         // Email
         "eml" => "message/rfc822",
         "msg" => "application/vnd.ms-outlook",
@@ -340,7 +349,7 @@ pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
     Ok(AttachmentData {
         filename,
         content_type,
-        data,
+        content: AttachmentContent::Bytes(data),
     })
 }
 
@@ -401,7 +410,7 @@ mod tests {
             tmp.path().file_name().unwrap().to_str().unwrap()
         );
         assert_eq!(att.content_type, "application/pdf");
-        assert_eq!(att.data, b"fake pdf");
+        assert!(matches!(att.content, AttachmentContent::Bytes(ref b) if b == b"fake pdf"));
     }
 
     #[test]

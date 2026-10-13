@@ -5,6 +5,7 @@
 
 use async_graphql::Schema;
 
+mod attachments;
 pub mod connection;
 pub mod filter;
 pub mod loaders;

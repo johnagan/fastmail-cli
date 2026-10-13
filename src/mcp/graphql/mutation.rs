@@ -5,6 +5,7 @@ use async_graphql::{Context, Object, Result};
 use crate::models::EmailAddress;
 use crate::util::parse_addresses;
 
+use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
 use super::types::*;
 
 pub struct MutationRoot;
@@ -27,6 +28,9 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files to attach, as base64 or by blobId")] attachments: Option<
+            Vec<AttachmentInput>,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
@@ -34,7 +38,20 @@ impl MutationRoot {
         let cc_addrs = cc.as_deref().map(parse_addresses).unwrap_or_default();
         let bcc_addrs = bcc.as_deref().map(parse_addresses).unwrap_or_default();
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
-        let params = [
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut client = client.lock().await;
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(failed(msg)),
+        };
+        let attachment_keys = attachments::fingerprint(&attachments);
+        let mut params = vec![
             to.as_str(),
             subject.as_str(),
             body.as_str(),
@@ -43,14 +60,17 @@ impl MutationRoot {
             from.as_deref().unwrap_or(""),
             html_body.as_deref().unwrap_or(""),
         ];
+        params.extend(attachment_keys.iter().map(String::as_str));
 
         if matches!(action, SendAction::Preview) {
             let nonce = super::types::issue_nonce(nonce_store, &params).await;
-            let mut preview =
-                format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body);
+            let mut body_preview = body.clone();
             if html_body.is_some() {
-                preview.push_str("\n[HTML body included]");
+                body_preview.push_str("\n[HTML body included]");
             }
+            body_preview.push_str(&attachments::preview(&attachments));
+            let preview =
+                format_send_preview(&to_addrs, &cc_addrs, &bcc_addrs, &subject, &body_preview);
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -73,9 +93,6 @@ impl MutationRoot {
         }
 
         let draft = matches!(action, SendAction::Draft);
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
-
         match client
             .send_email(
                 to_addrs,
@@ -88,7 +105,7 @@ impl MutationRoot {
                     from: from.as_deref(),
                     draft,
                     html_body,
-                    attachments: vec![],
+                    attachments: attachments.into_iter().map(|a| a.data).collect(),
                 },
             )
             .await
@@ -125,12 +142,28 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files to attach, as base64 or by blobId")] attachments: Option<
+            Vec<AttachmentInput>,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
         let reply_all = all.unwrap_or(false);
-        let params = [
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut client = client.lock().await;
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(failed(msg)),
+        };
+        let attachment_keys = attachments::fingerprint(&attachments);
+        let mut params = vec![
             email_id.as_str(),
             body.as_str(),
             if reply_all { "all" } else { "" },
@@ -139,8 +172,7 @@ impl MutationRoot {
             from.as_deref().unwrap_or(""),
             html_body.as_deref().unwrap_or(""),
         ];
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
+        params.extend(attachment_keys.iter().map(String::as_str));
 
         let original = client.get_email(&email_id).await?;
         let extra_cc = cc.as_deref().map(parse_addresses).unwrap_or_default();
@@ -196,6 +228,7 @@ impl MutationRoot {
             if html_body.is_some() {
                 preview.push_str("\n[HTML body included]");
             }
+            preview.push_str(&attachments::preview(&attachments));
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -229,7 +262,7 @@ impl MutationRoot {
                     from: from.as_deref(),
                     draft,
                     html_body,
-                    attachments: vec![],
+                    attachments: attachments.into_iter().map(|a| a.data).collect(),
                 },
             )
             .await
@@ -266,12 +299,28 @@ impl MutationRoot {
         #[graphql(desc = "HTML body content (alternative to plain text)")] html_body: Option<
             String,
         >,
+        #[graphql(desc = "Files to attach, as base64 or by blobId")] attachments: Option<
+            Vec<AttachmentInput>,
+        >,
         #[graphql(desc = "Token from PREVIEW response — required for CONFIRM/DRAFT")]
         confirmation_token: Option<String>,
     ) -> Result<GqlComposeResult> {
         let body_str = body.as_deref().unwrap_or("");
         let nonce_store = ctx.data::<super::types::NonceStore>()?;
-        let params = [
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let mut client = client.lock().await;
+        let attachments = match attachments::resolve(
+            &client,
+            attachments.unwrap_or_default(),
+            matches!(action, SendAction::Preview),
+        )
+        .await
+        {
+            Ok(a) => a,
+            Err(msg) => return Ok(failed(msg)),
+        };
+        let attachment_keys = attachments::fingerprint(&attachments);
+        let mut params = vec![
             email_id.as_str(),
             to.as_str(),
             body_str,
@@ -280,8 +329,7 @@ impl MutationRoot {
             from.as_deref().unwrap_or(""),
             html_body.as_deref().unwrap_or(""),
         ];
-        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
-        let mut client = client.lock().await;
+        params.extend(attachment_keys.iter().map(String::as_str));
 
         let original = client.get_email(&email_id).await?;
         let to_addrs = parse_addresses(&to);
@@ -327,6 +375,7 @@ impl MutationRoot {
             if html_body.is_some() {
                 preview.push_str("\n[HTML body included]");
             }
+            preview.push_str(&attachments::preview(&attachments));
             return Ok(GqlComposeResult {
                 success: true,
                 email_id: None,
@@ -360,7 +409,7 @@ impl MutationRoot {
                     from: from.as_deref(),
                     draft,
                     html_body,
-                    attachments: vec![],
+                    attachments: attachments.into_iter().map(|a| a.data).collect(),
                 },
             )
             .await
@@ -382,6 +431,32 @@ impl MutationRoot {
         }
     }
 
+    /// Put a file on the server without sending anything, and return its
+    /// `blobId` to attach by. Saves repeating the base64 in both PREVIEW and
+    /// CONFIRM, and keeps each request small.
+    async fn upload_attachment(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(desc = "File name the recipient sees")] name: String,
+        #[graphql(desc = "MIME type; inferred from the name when omitted")] content_type: Option<
+            String,
+        >,
+        #[graphql(desc = "The file's bytes, base64-encoded")] base64: String,
+    ) -> Result<GqlUploadedAttachment> {
+        let (name, content_type) = attachments::name_and_type(name, content_type)?;
+        let bytes = attachments::decode(&name, &base64, attachments::MAX_ATTACHMENT_BYTES)?;
+        let size = bytes.len() as u64;
+        let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
+        let client = client.lock().await;
+        let blob_id = client.upload_blob(bytes, &content_type).await?;
+        Ok(GqlUploadedAttachment {
+            blob_id,
+            name,
+            content_type,
+            size,
+        })
+    }
+
     /// Edit a saved draft. Only the fields given change; an empty string clears
     /// to/cc/bcc. A new `body` replaces any HTML part unless `htmlBody` comes
     /// with it. JMAP emails are immutable, so this saves an edited copy and
@@ -398,10 +473,21 @@ impl MutationRoot {
         #[graphql(desc = "Subject line")] subject: Option<String>,
         #[graphql(desc = "Plain-text body")] body: Option<String>,
         #[graphql(desc = "HTML body")] html_body: Option<String>,
+        #[graphql(
+            desc = "Replaces the draft's attachments; pass an existing one's blobId to keep it"
+        )]
+        attachments: Option<Vec<AttachmentInput>>,
     ) -> Result<GqlComposeResult> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
         let draft = client.get_email(&email_id).await?;
+        let attachments = match attachments {
+            Some(inputs) => match attachments::resolve(&client, inputs, true).await {
+                Ok(a) => Some(a.into_iter().map(|a| a.data).collect()),
+                Err(msg) => return Ok(failed(msg)),
+            },
+            None => None,
+        };
 
         let edit = crate::jmap::DraftEdit {
             to: to.as_deref().map(parse_addresses),
@@ -411,6 +497,7 @@ impl MutationRoot {
             subject,
             body,
             html_body,
+            attachments,
         };
         Ok(match client.replace_draft(&draft, edit).await {
             Ok(id) => GqlComposeResult {
@@ -469,11 +556,17 @@ impl MutationRoot {
                 draft.subject.as_deref().unwrap_or(""),
                 draft.text_content().unwrap_or_default(),
             );
-            let attachments: Vec<&str> = draft
+            let attachments: Vec<String> = draft
                 .attachments
                 .iter()
                 .flatten()
-                .map(|a| a.name.as_deref().unwrap_or("(unnamed)"))
+                .map(|a| {
+                    format!(
+                        "{} ({})",
+                        a.name.as_deref().unwrap_or("(unnamed)"),
+                        attachments::human_size(a.size as usize)
+                    )
+                })
                 .collect();
             if !attachments.is_empty() {
                 preview.push_str(&format!("\n\nAttachments: {}", attachments.join(", ")));
@@ -934,4 +1027,14 @@ fn format_send_preview(
         subject,
         body
     )
+}
+
+fn failed(msg: String) -> GqlComposeResult {
+    GqlComposeResult {
+        success: false,
+        email_id: None,
+        preview: None,
+        confirmation_token: None,
+        error: Some(msg),
+    }
 }

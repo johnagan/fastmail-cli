@@ -95,11 +95,19 @@ pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
     Ok(client)
 }
 
-/// File attachment data ready for upload
+/// An attachment for an outgoing email.
 pub struct AttachmentData {
     pub filename: String,
     pub content_type: String,
-    pub data: Vec<u8>,
+    pub content: AttachmentContent,
+}
+
+/// Where an attachment's bytes come from.
+pub enum AttachmentContent {
+    /// Bytes still to be uploaded.
+    Bytes(Vec<u8>),
+    /// A blob already on the server, referenced without re-uploading.
+    Blob(String),
 }
 
 /// Common parameters for compose operations (send, reply, forward)
@@ -124,6 +132,9 @@ pub struct DraftEdit {
     pub subject: Option<String>,
     pub body: Option<String>,
     pub html_body: Option<String>,
+    /// Replaces the draft's attachments. Inline parts an HTML body refers to
+    /// are kept either way.
+    pub attachments: Option<Vec<AttachmentData>>,
 }
 
 /// Threading headers for reply/forward
@@ -1352,17 +1363,7 @@ impl JmapClient {
         }
         email_create.insert("subject".into(), json!(draft.subject));
 
-        // Upload attachments and collect blob IDs
-        let mut uploaded_attachments: Vec<UploadedAttachment> = Vec::new();
-        for att in draft.attachments {
-            let blob_id = self.upload_blob(att.data, &att.content_type).await?;
-            uploaded_attachments.push(UploadedAttachment {
-                blob_id,
-                filename: att.filename,
-                content_type: att.content_type,
-                inline_cid: None,
-            });
-        }
+        let uploaded_attachments = self.upload_attachments(draft.attachments).await?;
 
         apply_body_structure(
             &mut email_create,
@@ -1468,6 +1469,28 @@ impl JmapClient {
     /// Download a blob (attachment) by ID
     #[instrument(skip(self))]
     pub async fn download_blob(&self, blob_id: &str) -> Result<Vec<u8>> {
+        let bytes = self.fetch_blob(blob_id).await?.bytes().await?;
+        Ok(bytes.to_vec())
+    }
+
+    /// A blob's size, read no further than `limit` bytes: past that, `limit + 1`.
+    /// Fastmail does not offer `Blob/get`, so this is a download, ended early.
+    pub async fn blob_size(&self, blob_id: &str, limit: usize) -> Result<usize> {
+        let mut resp = self.fetch_blob(blob_id).await?;
+        if let Some(len) = resp.content_length() {
+            return Ok(usize::try_from(len).unwrap_or(usize::MAX));
+        }
+        let mut size = 0;
+        while let Some(chunk) = resp.chunk().await? {
+            size += chunk.len();
+            if size > limit {
+                return Ok(limit + 1);
+            }
+        }
+        Ok(size)
+    }
+
+    async fn fetch_blob(&self, blob_id: &str) -> Result<reqwest::Response> {
         let account_id = self.account_id()?;
         let session = self.session()?;
 
@@ -1498,11 +1521,35 @@ impl JmapClient {
             404 => return Err(Error::Config(format!("Blob not found: {}", blob_id))),
             429 => return Err(Error::RateLimited),
             500..=599 => return Err(Error::Server(format!("Server error: {}", resp.status()))),
-            _ => {}
+            200..=299 => {}
+            code => {
+                return Err(Error::Server(format!(
+                    "Download of blob {blob_id} failed ({code})"
+                )));
+            }
         }
+        Ok(resp)
+    }
 
-        let bytes = resp.bytes().await?;
-        Ok(bytes.to_vec())
+    /// Upload whatever attachments are still bytes; blobs pass through as they are.
+    async fn upload_attachments(
+        &self,
+        attachments: Vec<AttachmentData>,
+    ) -> Result<Vec<UploadedAttachment>> {
+        let mut uploaded = Vec::with_capacity(attachments.len());
+        for att in attachments {
+            let blob_id = match att.content {
+                AttachmentContent::Bytes(data) => self.upload_blob(data, &att.content_type).await?,
+                AttachmentContent::Blob(id) => id,
+            };
+            uploaded.push(UploadedAttachment {
+                blob_id,
+                filename: att.filename,
+                content_type: att.content_type,
+                inline_cid: None,
+            });
+        }
+        Ok(uploaded)
     }
 
     /// Upload a blob (for attachments) and return the blobId
@@ -1701,7 +1748,7 @@ impl JmapClient {
             ),
         };
 
-        let attachments: Vec<UploadedAttachment> = draft
+        let mut attachments: Vec<UploadedAttachment> = draft
             .attachments
             .iter()
             .flatten()
@@ -1720,6 +1767,15 @@ impl JmapClient {
                 })
             })
             .collect();
+        if let Some(replacements) = edit.attachments {
+            attachments.retain(|a| {
+                a.inline_cid.as_ref().is_some_and(|cid| {
+                    html.as_deref()
+                        .is_some_and(|h| h.contains(&format!("cid:{cid}")))
+                })
+            });
+            attachments.extend(self.upload_attachments(replacements).await?);
+        }
 
         let mut email_create: HashMap<String, Value> = HashMap::new();
         email_create.insert("mailboxIds".into(), json!(draft.mailbox_ids));
