@@ -112,9 +112,13 @@ pub fn decode(name: &str, encoded: &str, room: usize) -> Result<Vec<u8>, String>
     if decoded_len.saturating_sub(2) > room {
         return Err(over_cap(MAX_ATTACHMENT_BYTES - room + decoded_len));
     }
-    base64::engine::general_purpose::STANDARD
+    let bytes = base64::engine::general_purpose::STANDARD
         .decode(compact)
-        .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))
+        .map_err(|e| format!("Attachment '{name}' is not valid base64: {e}"))?;
+    if bytes.len() > room {
+        return Err(over_cap(MAX_ATTACHMENT_BYTES - room + bytes.len()));
+    }
+    Ok(bytes)
 }
 
 fn over_cap(total: usize) -> String {

@@ -15,6 +15,13 @@
   CONFIRM with different attachments is rejected. Attachments are capped at
   25 MB per message.
 
+### Fixed
+
+- **Image attachments are sent with their image type.** The extension-based
+  MIME inference behind `fastmail send -a` knew documents only, so a PNG or JPEG
+  went out as `application/octet-stream` and mail clients showed it as a file
+  rather than an image.
+
 ## [3.6.0] - 2026-09-29
 
 ### Added
