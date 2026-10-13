@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-10-13
+
 ### Changed
 
 - **Inline attachments are fingerprinted with SHA-256**
