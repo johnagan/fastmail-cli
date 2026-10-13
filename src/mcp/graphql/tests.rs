@@ -2257,3 +2257,44 @@ async fn malformed_attachment_inputs_are_refused() {
     }
     assert!(downloads(&server).await.is_empty());
 }
+
+#[tokio::test]
+async fn a_blob_the_server_refuses_is_an_error_not_an_attachment() {
+    // A 403 body measured as the blob would put the wrong size in the preview
+    // and check the cap against it.
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+        .mount(&server)
+        .await;
+    let data = exec_with(
+        &build_schema(),
+        &client_for(&server),
+        SEND_WITH_ATTACHMENTS,
+        json!({
+            "action": "PREVIEW",
+            "attachments": [{ "name": "x.pdf", "blobId": "Gforeign" }],
+        }),
+    )
+    .await;
+    assert_eq!(data["sendEmail"]["success"], false, "{data}");
+    let error = data["sendEmail"]["error"].as_str().unwrap();
+    assert!(error.contains("403"), "{error}");
+}
+
+#[test]
+fn inline_content_is_fingerprinted_with_sha256() {
+    use crate::jmap::{AttachmentContent, AttachmentData};
+    let keys = super::attachments::fingerprint(&[super::attachments::Attachment {
+        data: AttachmentData {
+            filename: "a.txt".into(),
+            content_type: "text/plain".into(),
+            content: AttachmentContent::Bytes(b"abc".to_vec()),
+        },
+        size: 3,
+    }]);
+    assert!(
+        keys[0].ends_with("bytes:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"),
+        "{keys:?}"
+    );
+}

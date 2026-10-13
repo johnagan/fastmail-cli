@@ -170,15 +170,20 @@ fn over_cap(total: usize) -> String {
 /// What a confirmation token vouches for: each attachment's name, type and
 /// exact content. A blob's ID pins its content, since JMAP blobs are immutable.
 pub fn fingerprint(attachments: &[Attachment]) -> Vec<String> {
-    use std::hash::{Hash, Hasher};
+    use sha2::{Digest, Sha256};
     attachments
         .iter()
         .map(|a| {
+            // SHA-256 rather than the std hasher: the client chooses these
+            // bytes, and a 64-bit hash with fixed keys is within reach of a
+            // deliberate collision.
             let content = match &a.data.content {
                 AttachmentContent::Bytes(bytes) => {
-                    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                    bytes.hash(&mut hasher);
-                    format!("bytes:{:016x}", hasher.finish())
+                    let digest: String = Sha256::digest(bytes)
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    format!("bytes:{digest}")
                 }
                 AttachmentContent::Blob(id) => format!("blob:{id}"),
             };
