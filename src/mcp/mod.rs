@@ -256,12 +256,21 @@ confirmationToken; CONFIRM repeats exactly the same arguments plus that token,
 and is rejected if any differ. Recipients are comma-separated strings, not lists.
   sendEmail(action: SendAction!, to: String!, subject: String!, body: String!,
             cc: String, bcc: String, from: String, htmlBody: String,
-            confirmationToken: String): ComposeResult!
+            attachments: [AttachmentInput!], confirmationToken: String): ComposeResult!
   ComposeResult { success emailId preview confirmationToken error }
+
+Attachments — replyToEmail, forwardEmail and updateDraft take `attachments` too.
+The preview lists each file's name and size, and the token covers them.
+  AttachmentInput { name contentType base64 blobId }  # base64 OR blobId
+  uploadAttachment(name: String!, contentType: String, base64: String!)
+    : UploadedAttachment!                 # { blobId size }; send it once, attach by blobId
+An existing email's `attachments { nodes { blobId } }` attaches by blobId as well.
+25 MB in total per message.
 
 Saved drafts (find them with `emails(filter: {inMailbox: \"drafts\"})`):
   updateDraft(emailId: String!, to: String, cc: String, bcc: String,
-              subject: String, body: String): ComposeResult!  # returns the NEW emailId
+              subject: String, body: String,
+              attachments: [AttachmentInput!]): ComposeResult!  # returns the NEW emailId
   sendDraft(action: SendDraftAction!, emailId: String!,
             confirmationToken: String): ComposeResult!    # PREVIEW then CONFIRM
   deleteDraft(emailId: String!): Status!                  # moves to Trash
@@ -271,6 +280,7 @@ EXAMPLES
 { emails(filter: {unread: true, inMailbox: \"INBOX\", not: {hasKeyword: \"$answered\"}, or: [{from: \"a@b.com\"}, {to: \"a@b.com\"}]}, first: 10) { totalCount nodes { id subject from { email } } } }
 mutation { sendEmail(action: PREVIEW, to: \"a@b.com\", subject: \"Hi\", body: \"...\") { preview confirmationToken } }
 mutation { sendEmail(action: CONFIRM, to: \"a@b.com\", subject: \"Hi\", body: \"...\", confirmationToken: \"<from preview>\") { success emailId } }
+mutation { sendEmail(action: PREVIEW, to: \"a@b.com\", subject: \"Notes\", body: \"Attached.\", attachments: [{name: \"notes.txt\", base64: \"aGVsbG8=\"}]) { preview confirmationToken } }
 ```
 
 SUBSCRIPTIONS are not available through this tool — it is request/response, and

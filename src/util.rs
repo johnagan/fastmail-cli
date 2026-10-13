@@ -1,4 +1,4 @@
-use crate::jmap::AttachmentData;
+use crate::jmap::{AttachmentContent, AttachmentData};
 use crate::models::EmailAddress;
 use std::path::Path;
 
@@ -340,7 +340,7 @@ pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
     Ok(AttachmentData {
         filename,
         content_type,
-        data,
+        content: AttachmentContent::Bytes(data),
     })
 }
 

@@ -697,6 +697,45 @@ email and downloads nothing at all:
 }
 ```
 
+### Sending attachments
+
+`sendEmail`, `replyToEmail`, `forwardEmail` and `updateDraft` take
+`attachments: [AttachmentInput!]`. The server usually runs somewhere other than
+the client, so a local path means nothing to it; each attachment carries its
+content instead, as exactly one of:
+
+- `base64` — the file's bytes, inline.
+- `blobId` — a blob already on the server, attached without re-uploading:
+  one returned by `uploadAttachment`, or an existing email's
+  `attachments { nodes { blobId } }`.
+
+`name` is required; `contentType` is inferred from the name when omitted.
+
+```graphql
+mutation {
+  sendEmail(
+    action: PREVIEW
+    to: "a@example.com"
+    subject: "Report"
+    body: "Attached."
+    attachments: [{ name: "report.pdf", base64: "JVBERi0xLjQK..." }]
+  ) { preview confirmationToken }
+}
+```
+
+PREVIEW lists every attachment's name, type and size, and the confirmation
+token covers them: a CONFIRM whose attachments differ in name, type or content
+is rejected. Because CONFIRM repeats PREVIEW's arguments, inline base64 travels
+twice; `uploadAttachment(name:, base64:)` sends it once and returns a `blobId`
+to use in both. A blob given by ID is downloaded at PREVIEW to measure it, since
+Fastmail does not offer JMAP's `Blob/get`.
+
+Attachments are capped at 25 MB per message (Fastmail's own limit is 50 MB):
+every inline byte passes through a tool argument, a third larger as base64.
+`updateDraft`'s `attachments` replaces the draft's attachments; pass an
+existing one's `blobId` to keep it. Inline images an HTML body refers to are
+kept either way.
+
 ### Composable filters
 
 `EmailFilter` mirrors JMAP's filter tree (RFC 8620 §5.5) rather than flattening
