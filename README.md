@@ -462,8 +462,8 @@ Uploads and downloads refuse to replace existing files unless you pass
 
 ### Notes
 
-Notes use the existing JMAP email connection and Fastmail's `Notes` mailbox.
-Open Notes in Fastmail once to initialize this folder if it does not exist.
+Notes use the existing JMAP email connection and the mailbox with the `memos`
+role (named `Memos` by default), falling back to a mailbox named `Notes`.
 The commands distinguish notes from ordinary email using the
 `X-Uniform-Type-Identifier: com.apple.mail-note` header.
 

@@ -21,10 +21,17 @@ impl JmapClient {
 
     async fn notes_mailbox(&self) -> Result<String> {
         let mailboxes = self.fetch_mailboxes().await?;
-        let matches: Vec<_> = mailboxes.iter().filter(|m| m.name == "Notes").collect();
+        let mut matches: Vec<_> = mailboxes
+            .iter()
+            .filter(|m| m.role.as_deref() == Some("memos"))
+            .collect();
+        if matches.is_empty() {
+            matches = mailboxes.iter().filter(|m| m.name == "Notes").collect();
+        }
         ensure!(
             matches.len() == 1,
-            "Expected one Notes mailbox. Open Fastmail Notes to initialize it, or resolve duplicate Notes folders."
+            "Expected one notes mailbox (role memos, or name Notes); found {}",
+            matches.len()
         );
         Ok(matches[0].id.clone())
     }
@@ -178,6 +185,22 @@ impl JmapClient {
 mod tests {
     use super::*;
     use wiremock::{Mock, MockServer, ResponseTemplate, matchers::method};
+
+    #[tokio::test]
+    async fn notes_mailbox_uses_role_before_name() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "methodResponses": [["Mailbox/get", {"list": [
+                    {"id": "ordinary-folder", "name": "Notes"},
+                    {"id": "notes-folder", "name": "Memos", "role": "memos"}
+                ]}, "m0"]]
+            })))
+            .mount(&server)
+            .await;
+        let client = JmapClient::with_test_session(&server.uri());
+        assert_eq!(client.notes_mailbox().await.unwrap(), "notes-folder");
+    }
 
     async fn mock_notes_server(fail_create: bool) -> (MockServer, JmapClient) {
         let server = MockServer::start().await;
