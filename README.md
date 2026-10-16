@@ -1,6 +1,6 @@
 # fastmail-cli
 
-CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from your terminal or AI assistant.
+CLI for Fastmail. Read, search, send, manage and *watch* email from your terminal or AI assistant, and manage calendars, files, and notes from the CLI.
 
 ## Features
 
@@ -10,6 +10,9 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 | **Mailboxes**         | List folders, move emails, mark spam/read                              |
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
 | **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
+| **Calendars**         | CLI: discover calendars, query/read events, create/update/delete events from iCalendar files via CalDAV |
+| **Files**             | CLI: browse, upload, download, create folders, and delete via WebDAV   |
+| **Notes**             | CLI: list, search, read, create, edit plain-text notes, and delete via JMAP |
 | **Attachments**       | Download files, extract text, resize images                            |
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
@@ -22,8 +25,8 @@ CLI for Fastmail's JMAP API. Read, search, send, manage and *watch* email from y
 
 Fastmail [ships an official MCP server](https://www.fastmail.com/blog/an-mcp-server-for-fastmail/)
 (hosted at `api.fastmail.com/mcp`, OAuth with read/write/send scopes). It's
-zero-setup and covers more of Fastmail's suite — calendar, notes, and org
-directory that `fastmail-cli` doesn't touch. `fastmail-cli` is the self-hosted
+zero-setup and exposes calendar, notes, and org directory tools directly to AI
+clients. `fastmail-cli` offers calendar, file, and note commands in its CLI and is the self-hosted
 alternative: a CLI *and* an MCP server you run yourself, open source, with
 masked email, attachment text extraction, spam-filter training, and a real-time
 stream of incoming mail the official server doesn't offer — plus full custody of
@@ -33,7 +36,7 @@ the data path.
 | ---------------------------------------------------------- | ---------------------------------- | -------------------------------- |
 | Interface                                                  | CLI **and** MCP (stdio / HTTP)     | MCP only                         |
 | Setup                                                      | install + run the binary           | add URL + OAuth, nothing to run  |
-| Auth                                                       | API token (+ app password for CardDAV) | OAuth: `read` / `write` / `send` |
+| Auth                                                       | API token (+ app password for DAV services) | OAuth: `read` / `write` / `send` |
 | Hosting / data path                                        | your machine or your own server    | Fastmail-hosted                  |
 | Source                                                     | open source (MIT), extensible      | proprietary                      |
 | Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
@@ -47,16 +50,17 @@ the data path.
 | Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
 | Org directory search                                       | —                                  | ✅                               |
 | Calendar                                                   | ✅ (CLI, CalDAV)                   | ✅                               |
-| Notes                                                      | —                                  | ✅                               |
+| Notes                                                      | ✅ (CLI; plain-text editing)        | ✅                               |
+| Files                                                      | ✅ (CLI, WebDAV)                   | —                                |
 | Identities / signatures                                    | ✅                                 | ✅                               |
 
-Use Fastmail's for zero maintenance and the wider suite (calendar, notes);
+Use Fastmail's for zero maintenance and calendar/notes access through MCP;
 use `fastmail-cli` for a scriptable CLI, mail that streams as it arrives, the
 masked-email / attachment-extraction / spam-training tooling, or to self-host and
 keep the data path yours. Streaming is the one difference that isn't a matter of
 scope: MCP tools are request/response, so a hosted MCP server cannot hand you a
 subscription that never returns, whichever tools it grows.
-(`fastmail-cli`'s column is verified against its GraphQL schema; Fastmail's is
+(`fastmail-cli`'s column covers its CLI and GraphQL schema; Fastmail's is
 its current hosted tool set and may grow.)
 
 ## Quick Start
@@ -100,9 +104,9 @@ Credentials can be set via environment variables or config file. Env vars take p
 **Environment variables:**
 
 ```bash
-export FASTMAIL_API_TOKEN="fmu1-..."      # Required for JMAP (email)
-export FASTMAIL_USERNAME="you@fastmail.com"  # Required for CardDAV (contacts)
-export FASTMAIL_APP_PASSWORD="xxxx..."    # Required for CardDAV (contacts)
+export FASTMAIL_API_TOKEN="fmu1-..."      # Required for JMAP (email and notes)
+export FASTMAIL_USERNAME="you@fastmail.com"  # Required for contacts, calendars, files
+export FASTMAIL_APP_PASSWORD="xxxx..."    # App password with the relevant DAV permissions
 ```
 
 **Config file** (`~/.config/fastmail-cli/config.toml`):
@@ -117,6 +121,23 @@ app_password = "xxxx..."
 ```
 
 The `auth` command only sets `[core].api_token`. For contacts, add `[contacts]` section manually or use env vars.
+
+Calendar and file commands also use `FASTMAIL_USERNAME` and
+`FASTMAIL_APP_PASSWORD`. Generate an app password with **Calendar (CalDAV)** and
+**Files (WebDAV)** access for these commands. API tokens cannot authenticate to
+these DAV services. Use your account's original login username, not an alias.
+
+For config-file credentials, add:
+
+```toml
+[dav]
+username = "you@fastmail.com"
+app_password = "xxxx..."
+```
+
+Calendar/files resolve each credential from the environment first, then `[dav]`,
+then the existing `[contacts]` fields. Notes use the JMAP API token, with mail
+read/write access for mutations.
 
 ## Usage
 
@@ -390,6 +411,80 @@ fastmail contacts delete CONTACT_ID -y
 ```
 
 Generate an app password at [Fastmail Settings > Privacy & Security > Integrations > App passwords](https://app.fastmail.com/settings/security/devicekeys).
+
+### Calendars
+
+Calendar commands use CalDAV. Use the `href` values returned by `calendar list`
+and `calendar events` as identifiers; retain URL encoding in these hrefs.
+
+```bash
+fastmail calendar list
+
+# Bounds are UTC iCalendar timestamps, with an exclusive upper bound.
+fastmail calendar events '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/' \
+  --after 20261001T000000Z --before 20261101T000000Z
+
+fastmail calendar get '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/EVENT.ics'
+fastmail calendar create '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/' event.ics
+
+# Use the ETag returned by get/events, including the quotes in its value.
+fastmail calendar update '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/EVENT.ics' \
+  event.ics --etag '"CURRENT_ETAG"'
+fastmail calendar delete '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/EVENT.ics' -y
+```
+
+Events are returned in `calendarData` as complete iCalendar text, including
+recurrence rules and time-zone definitions. Queries return matching calendar
+resources rather than expanding recurring events into individual occurrences.
+Create/update accept complete UTF-8 `.ics` files containing `VCALENDAR` and
+`VEVENT`. Updates replace the whole resource; preserve its UID when editing.
+An outdated ETag produces an HTTP 412 error so you can fetch the current event
+before retrying. Deletes optionally accept `--etag` too.
+
+### Files
+
+File paths are relative to your own Fastmail Files root at
+`https://myfiles.fastmail.com/`. Pass literal paths, including spaces, rather
+than URL-encoded paths. Listings include a decoded `path` for subsequent commands
+and the original DAV `href`.
+
+```bash
+fastmail files list
+fastmail files mkdir /Reports
+fastmail files upload ./report.pdf '/Reports/Quarterly report.pdf'
+fastmail files list /Reports/
+fastmail files download '/Reports/Quarterly report.pdf' --output ./report-copy.pdf
+fastmail files delete '/Reports/Quarterly report.pdf' -y
+```
+
+Uploads and downloads refuse to replace existing files unless you pass
+`--overwrite`. Deleting a folder with `-y` removes its contents too.
+
+### Notes
+
+Notes use the existing JMAP email connection and Fastmail's `Notes` mailbox.
+Open Notes in Fastmail once to initialize this folder if it does not exist.
+The commands distinguish notes from ordinary email using the
+`X-Uniform-Type-Identifier: com.apple.mail-note` header.
+
+```bash
+fastmail notes list --limit 25
+fastmail notes search 'shopping' --limit 10
+fastmail notes get NOTE_ID
+fastmail notes create --title 'Shopping list' --body $'Coffee\nBread'
+fastmail notes update NOTE_ID --body $'Coffee\nBread\nMilk'
+fastmail notes delete NOTE_ID -y
+```
+
+Get returns the message's `textBody`, `htmlBody`, and `bodyValues`. Create writes
+plain-text notes with Apple note identifiers. Update supports single-part
+plain-text notes and preserves their UUID and keywords, including pinned status;
+edit rich-text or attachment-bearing notes in Fastmail. An update saves a new
+message before deleting the old one and returns a **new note ID**. Delete is
+permanent and requires `-y`.
+
+Calendar, file, and note commands are currently CLI features. Use the CLI for
+these operations; their commands are not exposed through MCP/GraphQL yet.
 
 ### Masked Email
 
