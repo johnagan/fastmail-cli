@@ -14,7 +14,7 @@ pub struct DavClient {
     password: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, async_graphql::SimpleObject)]
 #[serde(rename_all = "camelCase")]
 pub struct DavResource {
     pub href: String,
@@ -137,6 +137,16 @@ impl DavClient {
         after: Option<&str>,
         before: Option<&str>,
     ) -> Result<Vec<DavResource>> {
+        self.events_expanded(calendar, after, before, false).await
+    }
+
+    pub async fn events_expanded(
+        &self,
+        calendar: &str,
+        after: Option<&str>,
+        before: Option<&str>,
+        expand: bool,
+    ) -> Result<Vec<DavResource>> {
         let mut range = String::new();
         for (key, value) in [("start", after), ("end", before)] {
             if let Some(value) = value {
@@ -155,8 +165,16 @@ impl DavClient {
         } else {
             format!("<c:time-range{range}/>")
         };
+        let data = if expand {
+            let (Some(start), Some(end)) = (after, before) else {
+                bail!("Expansion requires --after and --before");
+            };
+            format!(r#"<c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data>"#)
+        } else {
+            "<c:calendar-data/>".into()
+        };
         let body = format!(
-            r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/><c:calendar-data/></d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">{range}</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"#
+            r#"<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><d:getetag/>{data}</d:prop><c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">{range}</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"#
         );
         let text = self
             .request(
@@ -226,6 +244,230 @@ impl DavClient {
         Ok(())
     }
 
+    /// MOVE also handles renames; both resource URLs stay on this DAV origin.
+    pub async fn transfer(
+        &self,
+        source: &str,
+        destination: &str,
+        copy: bool,
+        overwrite: bool,
+    ) -> Result<()> {
+        let source = self.url(source)?;
+        ensure!(source.path() != "/", "Cannot move or copy the service root");
+        let destination = self.url(destination)?;
+        ensure!(
+            destination.path() != "/" && source != destination,
+            "Choose a distinct non-root destination"
+        );
+        let method = if copy { "COPY" } else { "MOVE" };
+        let response = self
+            .client
+            .request(Method::from_bytes(method.as_bytes())?, source)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Destination", destination.as_str())
+            .header("Overwrite", if overwrite { "T" } else { "F" })
+            .header("Depth", "infinity")
+            .send()
+            .await?;
+        ensure!(
+            response.status().is_success(),
+            "DAV {method} failed: {}",
+            response.status()
+        );
+        if response.status().as_u16() == 207 {
+            check_multistatus(&response.text().await?)?;
+        }
+        Ok(())
+    }
+
+    pub fn calendar_home(&self) -> String {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .unwrap()
+            .extend(["dav", "calendars", "user", &self.username, ""]);
+        url.path().into()
+    }
+
+    pub async fn create_calendar(
+        &self,
+        href: &str,
+        name: &str,
+        description: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<()> {
+        ensure!(
+            href.ends_with('/'),
+            "Calendar collection href must end with /"
+        );
+        let properties = calendar_properties(Some(name), description, color);
+        let body = format!(
+            r#"<c:mkcalendar xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/"><d:set><d:prop>{properties}</d:prop></d:set></c:mkcalendar>"#
+        );
+        let response = self
+            .request(
+                "MKCALENDAR",
+                href,
+                body.into_bytes(),
+                "application/xml; charset=utf-8",
+                None,
+                None,
+            )
+            .await?;
+        if response.status().as_u16() == 207 {
+            check_multistatus(&response.text().await?)?;
+        }
+        Ok(())
+    }
+
+    pub async fn update_calendar(
+        &self,
+        href: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        color: Option<&str>,
+    ) -> Result<()> {
+        let properties = calendar_properties(name, description, color);
+        ensure!(
+            !properties.is_empty(),
+            "Provide a calendar property to change"
+        );
+        let body = format!(
+            r#"<d:propertyupdate xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:d="DAV:" xmlns:a="http://apple.com/ns/ical/"><d:set><d:prop>{properties}</d:prop></d:set></d:propertyupdate>"#
+        );
+        let response = self
+            .request(
+                "PROPPATCH",
+                href,
+                body.into_bytes(),
+                "application/xml; charset=utf-8",
+                None,
+                None,
+            )
+            .await?;
+        if response.status().as_u16() == 207 {
+            check_multistatus(&response.text().await?)?;
+        }
+        Ok(())
+    }
+
+    pub async fn free_busy(&self, href: &str, start: &str, end: &str) -> Result<String> {
+        ensure!(
+            valid_timestamp(start) && valid_timestamp(end) && start < end,
+            "Use an increasing UTC iCalendar time range"
+        );
+        let body = format!(
+            r#"<c:free-busy-query xmlns:c="urn:ietf:params:xml:ns:caldav"><c:time-range start="{start}" end="{end}"/></c:free-busy-query>"#
+        );
+        self.request(
+            "REPORT",
+            href,
+            body.into_bytes(),
+            "application/xml; charset=utf-8",
+            Some("1"),
+            None,
+        )
+        .await?
+        .text()
+        .await
+        .map_err(Into::into)
+    }
+
+    /// Discover scheduling endpoints from the current user's principal.
+    pub async fn scheduling(&self) -> Result<serde_json::Value> {
+        let body = br#"<d:propfind xmlns:d="DAV:"><d:prop><d:current-user-principal/></d:prop></d:propfind>"#;
+        let text = self
+            .request(
+                "PROPFIND",
+                "/",
+                body.to_vec(),
+                "application/xml",
+                Some("0"),
+                None,
+            )
+            .await?
+            .text()
+            .await?;
+        let doc = roxmltree::Document::parse(&text)?;
+        let principal = property_hrefs(&doc, DAV, "current-user-principal")
+            .into_iter()
+            .next()
+            .context("Server returned no current-user-principal")?;
+        let body = br#"<d:propfind xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:schedule-inbox-URL/><c:schedule-outbox-URL/><c:calendar-user-address-set/><c:calendar-home-set/></d:prop></d:propfind>"#;
+        let text = self
+            .request(
+                "PROPFIND",
+                &principal,
+                body.to_vec(),
+                "application/xml",
+                Some("0"),
+                None,
+            )
+            .await?
+            .text()
+            .await?;
+        let doc = roxmltree::Document::parse(&text)?;
+        Ok(
+            serde_json::json!({"principal": principal, "inbox": property_hrefs(&doc, CAL, "schedule-inbox-URL"), "outbox": property_hrefs(&doc, CAL, "schedule-outbox-URL"), "addresses": property_hrefs(&doc, CAL, "calendar-user-address-set"), "home": property_hrefs(&doc, CAL, "calendar-home-set")}),
+        )
+    }
+
+    /// Send an iTIP REQUEST/REPLY/CANCEL through a CalDAV scheduling outbox.
+    pub async fn schedule(
+        &self,
+        outbox: &str,
+        originator: &str,
+        recipients: &[String],
+        data: Vec<u8>,
+    ) -> Result<serde_json::Value> {
+        ensure!(!recipients.is_empty(), "Provide at least one recipient");
+        let mut request = self
+            .client
+            .post(self.url(outbox)?)
+            .basic_auth(&self.username, Some(&self.password))
+            .header("Content-Type", "text/calendar; charset=utf-8")
+            .header("Originator", originator)
+            .body(data);
+        for recipient in recipients {
+            request = request.header("Recipient", recipient);
+        }
+        let response = request.send().await?;
+        ensure!(
+            response.status().is_success(),
+            "CalDAV scheduling failed: {}",
+            response.status()
+        );
+        let text = response.text().await?;
+        let doc = roxmltree::Document::parse(&text).context("Invalid scheduling response")?;
+        ensure!(
+            doc.root_element().has_tag_name((CAL, "schedule-response")),
+            "Expected a CalDAV schedule-response"
+        );
+        let mut results = Vec::new();
+        for response in doc
+            .root_element()
+            .children()
+            .filter(|n| n.has_tag_name((CAL, "response")))
+        {
+            let field = |name| {
+                response
+                    .children()
+                    .find(|n| n.has_tag_name((CAL, name)))
+                    .and_then(|n| n.text())
+                    .map(str::to_owned)
+            };
+            let recipient = response
+                .descendants()
+                .find(|n| n.has_tag_name((DAV, "href")))
+                .and_then(|n| n.text());
+            results.push(serde_json::json!({"recipient": recipient, "requestStatus": field("request-status"), "calendarData": field("calendar-data")}));
+        }
+        ensure!(
+            !results.is_empty(),
+            "Scheduling returned no recipient statuses"
+        );
+        Ok(serde_json::json!({"responses": results}))
+    }
+
     pub async fn delete(&self, href: &str, etag: Option<&str>) -> Result<()> {
         ensure!(
             self.url(href)?.path() != "/",
@@ -268,6 +510,80 @@ impl DavClient {
         }
         Ok(())
     }
+}
+
+fn xml_escape(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&apos;")
+}
+
+fn calendar_properties(
+    name: Option<&str>,
+    description: Option<&str>,
+    color: Option<&str>,
+) -> String {
+    [
+        ("d:displayname", name),
+        ("c:calendar-description", description),
+        ("a:calendar-color", color),
+    ]
+    .into_iter()
+    .filter_map(|(key, value)| value.map(|value| format!("<{key}>{}</{key}>", xml_escape(value))))
+    .collect()
+}
+
+fn check_multistatus(xml: &str) -> Result<()> {
+    let doc = roxmltree::Document::parse(xml)?;
+    ensure!(
+        doc.root_element().has_tag_name((DAV, "multistatus")),
+        "Expected a DAV multistatus"
+    );
+    let statuses: Vec<_> = doc
+        .descendants()
+        .filter(|n| n.has_tag_name((DAV, "status")))
+        .filter_map(|n| n.text())
+        .collect();
+    ensure!(
+        !statuses.is_empty(),
+        "DAV operation returned no resource statuses"
+    );
+    for status in statuses {
+        ensure!(
+            status
+                .split_whitespace()
+                .nth(1)
+                .and_then(|s| s.parse::<u16>().ok())
+                .is_some_and(|code| (200..300).contains(&code)),
+            "DAV operation was incomplete: {status}"
+        );
+    }
+    Ok(())
+}
+
+fn property_hrefs(doc: &roxmltree::Document<'_>, ns: &str, property: &str) -> Vec<String> {
+    doc.descendants()
+        .filter(|n| n.has_tag_name((ns, property)))
+        .filter(|n| {
+            n.ancestors()
+                .find(|a| a.has_tag_name((DAV, "propstat")))
+                .is_none_or(|propstat| {
+                    propstat
+                        .children()
+                        .find(|n| n.has_tag_name((DAV, "status")))
+                        .and_then(|n| n.text())
+                        .is_some_and(|s| s.split_whitespace().nth(1) == Some("200"))
+                })
+        })
+        .flat_map(|n| {
+            n.children()
+                .filter(|n| n.has_tag_name((DAV, "href")))
+                .filter_map(|n| n.text().map(str::to_owned))
+        })
+        .collect()
 }
 
 fn valid_timestamp(value: &str) -> bool {
@@ -486,5 +802,143 @@ mod tests {
                 .to_string()
                 .contains("incomplete")
         );
+    }
+
+    #[tokio::test]
+    async fn transfers_are_server_side_and_partial_failures_are_errors() {
+        let server = MockServer::start().await;
+        let client = DavClient::new(&server.uri(), "u".into(), "p".into()).unwrap();
+        Mock::given(method("MOVE"))
+            .and(path("/old%20name"))
+            .and(header(
+                "Destination",
+                format!("{}/new%20name", server.uri()).as_str(),
+            ))
+            .and(header("Overwrite", "F"))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .transfer("/old%20name", "/new%20name", false, false)
+            .await
+            .unwrap();
+        Mock::given(method("COPY")).and(header("Overwrite", "T"))
+            .respond_with(ResponseTemplate::new(207).set_body_string(r#"<multistatus xmlns="DAV:"><response><href>/folder/locked</href><status>HTTP/1.1 423 Locked</status></response></multistatus>"#)).expect(1).mount(&server).await;
+        assert!(
+            client
+                .transfer("/folder/", "/copy/", true, true)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("incomplete")
+        );
+        assert!(
+            client
+                .transfer("/folder/", "https://elsewhere.example/copy/", true, false)
+                .await
+                .is_err()
+        );
+        assert!(client.transfer("/", "/copy/", true, false).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn calendar_collection_edits_escape_values_and_inspect_property_statuses() {
+        let server = MockServer::start().await;
+        let client = DavClient::new(&server.uri(), "u".into(), "p".into()).unwrap();
+        Mock::given(method("MKCALENDAR"))
+            .and(body_string_contains(
+                "<d:displayname>Work &amp; Home &lt;3</d:displayname>",
+            ))
+            .and(body_string_contains(
+                "<a:calendar-color>#112233</a:calendar-color>",
+            ))
+            .respond_with(ResponseTemplate::new(201))
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .create_calendar("/new/", "Work & Home <3", None, Some("#112233"))
+            .await
+            .unwrap();
+        Mock::given(method("PROPPATCH")).respond_with(ResponseTemplate::new(207).set_body_string(r#"<multistatus xmlns="DAV:"><response><href>/new/</href><propstat><prop><displayname/></prop><status>HTTP/1.1 403 Forbidden</status></propstat></response></multistatus>"#)).expect(1).mount(&server).await;
+        assert!(
+            client
+                .update_calendar("/new/", Some("Changed"), None, None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("403")
+        );
+    }
+
+    #[tokio::test]
+    async fn recurring_expansion_and_freebusy_use_bounded_reports() {
+        let server = MockServer::start().await;
+        let client = DavClient::new(&server.uri(), "u".into(), "p".into()).unwrap();
+        Mock::given(method("REPORT"))
+            .and(body_string_contains(
+                "<c:expand start=\"20261016T000000Z\" end=\"20261017T000000Z\"/>",
+            ))
+            .respond_with(
+                ResponseTemplate::new(207).set_body_string("<multistatus xmlns=\"DAV:\"/>"),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        client
+            .events_expanded(
+                "/cal/",
+                Some("20261016T000000Z"),
+                Some("20261017T000000Z"),
+                true,
+            )
+            .await
+            .unwrap();
+        assert!(
+            client
+                .events_expanded("/cal/", None, None, true)
+                .await
+                .is_err()
+        );
+        Mock::given(method("REPORT"))
+            .and(body_string_contains("free-busy-query"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "BEGIN:VCALENDAR\r\nBEGIN:VFREEBUSY\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n",
+            ))
+            .expect(1)
+            .mount(&server)
+            .await;
+        assert!(
+            client
+                .free_busy("/cal/", "20261016T000000Z", "20261017T000000Z")
+                .await
+                .unwrap()
+                .contains("VFREEBUSY")
+        );
+    }
+
+    #[tokio::test]
+    async fn scheduling_posts_itip_and_returns_recipient_statuses() {
+        let server = MockServer::start().await;
+        let client = DavClient::new(&server.uri(), "u".into(), "p".into()).unwrap();
+        Mock::given(method("POST")).and(path("/outbox/"))
+            .and(header("Originator", "mailto:me@example.com")).and(header("Recipient", "mailto:you@example.com"))
+            .and(body_string_contains("METHOD:REPLY"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(r#"<c:schedule-response xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:d="DAV:"><c:response><c:recipient><d:href>mailto:you@example.com</d:href></c:recipient><c:request-status>2.0;Success</c:request-status></c:response></c:schedule-response>"#)).expect(1).mount(&server).await;
+        let result = client
+            .schedule(
+                "/outbox/",
+                "mailto:me@example.com",
+                &["mailto:you@example.com".into()],
+                b"BEGIN:VCALENDAR\r\nMETHOD:REPLY\r\nEND:VCALENDAR\r\n".to_vec(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result["responses"][0]["recipient"],
+            "mailto:you@example.com"
+        );
+        assert_eq!(result["responses"][0]["requestStatus"], "2.0;Success");
     }
 }

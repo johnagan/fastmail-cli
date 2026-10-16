@@ -5,14 +5,609 @@ use async_graphql::{Context, Object, Result};
 use crate::models::EmailAddress;
 use crate::util::parse_addresses;
 
+use super::api::*;
 use super::attachments::{self, AttachmentInput, GqlUploadedAttachment};
 use super::types::*;
 
 pub struct MutationRoot;
 
+#[derive(async_graphql::InputObject)]
+pub struct MailboxUpdateInput {
+    pub name: Option<String>,
+    pub parent_id: Option<String>,
+    /// Move to the root instead of a parent mailbox.
+    pub root: Option<bool>,
+    pub sort_order: Option<u32>,
+    pub is_subscribed: Option<bool>,
+}
+
+#[derive(async_graphql::InputObject)]
+pub struct VacationResponseInput {
+    pub is_enabled: Option<bool>,
+    pub subject: Option<String>,
+    pub text_body: Option<String>,
+    pub html_body: Option<String>,
+    pub from_date: Option<String>,
+    pub to_date: Option<String>,
+    pub clear_from: Option<bool>,
+    pub clear_to: Option<bool>,
+}
+
 #[Object]
 #[allow(clippy::too_many_arguments)]
 impl MutationRoot {
+    async fn empty_trash(&self, ctx: &Context<'_>) -> Result<SetResult> {
+        let mut client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.empty_trash().await?.into())
+    }
+    /// Bulk keyword/membership patches. False keyword values remove the keyword.
+    async fn patch_emails(
+        &self,
+        ctx: &Context<'_>,
+        ids: Vec<String>,
+        keywords: Option<async_graphql::Json<std::collections::HashMap<String, bool>>>,
+        add_mailboxes: Option<Vec<String>>,
+        remove_mailboxes: Option<Vec<String>>,
+        move_to: Option<String>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client
+            .patch_emails(
+                &ids,
+                &keywords.map(|v| v.0).unwrap_or_default(),
+                &add_mailboxes.unwrap_or_default(),
+                &remove_mailboxes.unwrap_or_default(),
+                move_to.as_deref(),
+            )
+            .await?
+            .into())
+    }
+
+    /// Permanently destroy messages, returning per-record success/failure details.
+    async fn destroy_emails(&self, ctx: &Context<'_>, ids: Vec<String>) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.destroy_emails(&ids).await?.into())
+    }
+
+    async fn update_identity(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        patch: async_graphql::Json<serde_json::Value>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.update_identity(&id, patch.0).await?.into())
+    }
+
+    async fn cancel_submissions(&self, ctx: &Context<'_>, ids: Vec<String>) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.cancel_submission(&ids).await?.into())
+    }
+
+    async fn copy_emails(
+        &self,
+        ctx: &Context<'_>,
+        from_account_id: String,
+        emails: async_graphql::Json<serde_json::Value>,
+        #[graphql(default = false)] destroy_original: bool,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client
+            .copy_emails(&from_account_id, emails.0, destroy_original)
+            .await?
+            .into())
+    }
+
+    async fn parse_email(&self, ctx: &Context<'_>, base64: String) -> Result<ParseResult> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(base64)?;
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.parse_email(bytes).await?.into())
+    }
+
+    /// Native PushSubscription/set arguments, including verificationCode updates.
+    async fn set_push_subscriptions(
+        &self,
+        ctx: &Context<'_>,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.set_push_subscriptions(arguments.0).await?.into())
+    }
+
+    async fn create_calendar(
+        &self,
+        ctx: &Context<'_>,
+        href: String,
+        name: String,
+        description: Option<String>,
+        color: Option<String>,
+    ) -> Result<DavWriteResult> {
+        dav(ctx, false)?
+            .create_calendar(&href, &name, description.as_deref(), color.as_deref())
+            .await?;
+        Ok(DavWriteResult {
+            href,
+            etag: None,
+            success: true,
+        })
+    }
+
+    async fn update_calendar(
+        &self,
+        ctx: &Context<'_>,
+        href: String,
+        name: Option<String>,
+        description: Option<String>,
+        color: Option<String>,
+    ) -> Result<DavWriteResult> {
+        dav(ctx, false)?
+            .update_calendar(
+                &href,
+                name.as_deref(),
+                description.as_deref(),
+                color.as_deref(),
+            )
+            .await?;
+        Ok(DavWriteResult {
+            href,
+            etag: None,
+            success: true,
+        })
+    }
+
+    async fn delete_calendar(&self, ctx: &Context<'_>, href: String) -> Result<DavWriteResult> {
+        let client = dav(ctx, false)?;
+        if !client.calendars().await?.iter().any(|c| c.href == href) {
+            return Err("Use a calendar href returned by calendars".into());
+        }
+        client.delete(&href, None).await?;
+        Ok(DavWriteResult {
+            href,
+            etag: None,
+            success: true,
+        })
+    }
+
+    /// Create an event if absent, or replace it conditionally using its current ETag.
+    async fn put_calendar_event(
+        &self,
+        ctx: &Context<'_>,
+        href: String,
+        calendar_data: String,
+        etag: Option<String>,
+    ) -> Result<DavWriteResult> {
+        validate_calendar(&calendar_data)?;
+        let etag = dav(ctx, false)?
+            .put(
+                &href,
+                calendar_data.into_bytes(),
+                "text/calendar; charset=utf-8",
+                etag.as_deref(),
+                false,
+            )
+            .await?;
+        Ok(DavWriteResult {
+            href,
+            etag,
+            success: true,
+        })
+    }
+
+    async fn delete_calendar_event(
+        &self,
+        ctx: &Context<'_>,
+        href: String,
+        etag: Option<String>,
+    ) -> Result<DavWriteResult> {
+        if !href.trim_end_matches('/').ends_with(".ics") {
+            return Err("Use an event .ics href".into());
+        }
+        dav(ctx, false)?.delete(&href, etag.as_deref()).await?;
+        Ok(DavWriteResult {
+            href,
+            etag: None,
+            success: true,
+        })
+    }
+
+    async fn schedule_calendar(
+        &self,
+        ctx: &Context<'_>,
+        outbox: String,
+        originator: String,
+        recipients: Vec<String>,
+        calendar_data: String,
+    ) -> Result<Vec<SchedulingResponse>> {
+        validate_calendar(&calendar_data)?;
+        if !calendar_data
+            .lines()
+            .any(|line| line.trim_end().starts_with("METHOD:"))
+        {
+            return Err("Scheduling requires METHOD".into());
+        }
+        Ok(scheduling_responses(
+            dav(ctx, false)?
+                .schedule(
+                    &outbox,
+                    &originator,
+                    &recipients,
+                    calendar_data.into_bytes(),
+                )
+                .await?,
+        ))
+    }
+
+    async fn upload_file(
+        &self,
+        ctx: &Context<'_>,
+        path: String,
+        base64: String,
+        #[graphql(default = false)] overwrite: bool,
+    ) -> Result<DavWriteResult> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(base64)?;
+        let etag = dav(ctx, true)?
+            .put(
+                &crate::dav::DavClient::file_path(&path)?,
+                bytes,
+                "application/octet-stream",
+                None,
+                overwrite,
+            )
+            .await?;
+        Ok(DavWriteResult {
+            href: path,
+            etag,
+            success: true,
+        })
+    }
+
+    async fn transfer_file(
+        &self,
+        ctx: &Context<'_>,
+        source: String,
+        destination: String,
+        #[graphql(default = false)] copy: bool,
+        #[graphql(default = false)] overwrite: bool,
+    ) -> Result<DavWriteResult> {
+        dav(ctx, true)?
+            .transfer(
+                &crate::dav::DavClient::file_path(&source)?,
+                &crate::dav::DavClient::file_path(&destination)?,
+                copy,
+                overwrite,
+            )
+            .await?;
+        Ok(DavWriteResult {
+            href: destination,
+            etag: None,
+            success: true,
+        })
+    }
+
+    async fn create_file_folder(&self, ctx: &Context<'_>, path: String) -> Result<DavWriteResult> {
+        dav(ctx, true)?
+            .mkdir(&crate::dav::DavClient::file_path(&path)?)
+            .await?;
+        Ok(DavWriteResult {
+            href: path,
+            etag: None,
+            success: true,
+        })
+    }
+
+    async fn delete_file(&self, ctx: &Context<'_>, path: String) -> Result<DavWriteResult> {
+        dav(ctx, true)?
+            .delete(&crate::dav::DavClient::file_path(&path)?, None)
+            .await?;
+        Ok(DavWriteResult {
+            href: path,
+            etag: None,
+            success: true,
+        })
+    }
+    /// Create a full JSContact Card. Omitted addressBookId uses its memberships or a writable default.
+    async fn create_contact_card(
+        &self,
+        ctx: &Context<'_>,
+        card: async_graphql::Json<serde_json::Value>,
+        address_book_id: Option<String>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client
+                .create_contact_card(card.0, address_book_id.as_deref())
+                .await?,
+        ))
+    }
+
+    /// Apply a native JMAP PatchObject to any JSContact fields.
+    async fn update_contact_card(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        patch: async_graphql::Json<serde_json::Value>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client
+                .contacts_set(false, serde_json::json!({"update": {id: patch.0}}))
+                .await?,
+        ))
+    }
+
+    /// Native AddressBook/set: create/update/destroy, subscriptions, sharing, default selection.
+    async fn set_address_books(
+        &self,
+        ctx: &Context<'_>,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client.contacts_set(true, arguments.0).await?,
+        ))
+    }
+
+    /// Copy a creation-ID to card map from a different account.
+    async fn copy_contact_cards(
+        &self,
+        ctx: &Context<'_>,
+        from_account_id: String,
+        cards: async_graphql::Json<serde_json::Value>,
+        #[graphql(default = false)] destroy_original: bool,
+    ) -> Result<SetResult> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client
+                .copy_contacts(&from_account_id, cards.0, destroy_original)
+                .await?,
+        ))
+    }
+
+    /// Upload a photo into the contacts account, retaining non-photo media.
+    async fn set_contact_photo(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        base64: String,
+        content_type: String,
+    ) -> Result<SetResult> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(base64)?;
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client.set_contact_photo(&id, bytes, &content_type).await?,
+        ))
+    }
+
+    /// Create an Apple-compatible note with text, HTML, and optional attachments.
+    async fn create_note(
+        &self,
+        ctx: &Context<'_>,
+        title: String,
+        body: Option<String>,
+        html_body: Option<String>,
+        attachments: Option<Vec<AttachmentInput>>,
+    ) -> Result<CreatedRecord> {
+        if body.is_none() && html_body.is_none() {
+            return Err("Provide body or htmlBody".into());
+        }
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        let attachments = attachments::resolve(&client, attachments.unwrap_or_default(), false)
+            .await
+            .map_err(async_graphql::Error::new)?;
+        Ok(CreatedRecord::from(
+            client
+                .create_rich_note(crate::jmap::NoteEdit {
+                    title: Some(title),
+                    body,
+                    html_body,
+                    attachments: Some(attachments.into_iter().map(|a| a.data).collect()),
+                })
+                .await?,
+        ))
+    }
+
+    /// Replace a note after saving its new content; returns a new message ID.
+    /// Omit attachments to preserve them; pass [] to remove regular attachments.
+    async fn update_note(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        title: Option<String>,
+        body: Option<String>,
+        html_body: Option<String>,
+        attachments: Option<Vec<AttachmentInput>>,
+    ) -> Result<CreatedRecord> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        let attachments = match attachments {
+            Some(inputs) => Some(
+                attachments::resolve(&client, inputs, false)
+                    .await
+                    .map_err(async_graphql::Error::new)?
+                    .into_iter()
+                    .map(|a| a.data)
+                    .collect(),
+            ),
+            None => None,
+        };
+        Ok(CreatedRecord::from(
+            client
+                .update_rich_note(
+                    &id,
+                    crate::jmap::NoteEdit {
+                        title,
+                        body,
+                        html_body,
+                        attachments,
+                    },
+                )
+                .await?,
+        ))
+    }
+
+    async fn delete_note(&self, ctx: &Context<'_>, id: String) -> Result<GqlStatus> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        client.delete_note(&id).await?;
+        Ok(GqlStatus {
+            success: true,
+            message: Some("Note deleted.".into()),
+            error: None,
+        })
+    }
+    /// Create a mailbox. Parent is a mailbox ID.
+    async fn create_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        name: String,
+        parent_id: Option<String>,
+        role: Option<String>,
+    ) -> Result<CreatedRecord> {
+        let mut properties = serde_json::json!({"name": name});
+        if let Some(parent) = parent_id {
+            properties["parentId"] = serde_json::json!(parent);
+        }
+        if let Some(role) = role {
+            properties["role"] = serde_json::json!(role);
+        }
+        let mut client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.create_mailbox(properties).await?.into())
+    }
+
+    /// Rename, reparent, subscribe, or reorder a mailbox.
+    async fn update_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        input: MailboxUpdateInput,
+    ) -> Result<SetResult> {
+        let mut p = serde_json::json!({});
+        if input.root == Some(true) && input.parent_id.is_some() {
+            return Err("Use root or parentId, not both".into());
+        }
+        if let Some(name) = input.name {
+            p["name"] = serde_json::json!(name);
+        }
+        if let Some(parent) = input.parent_id {
+            p["parentId"] = serde_json::json!(parent);
+        }
+        if input.root == Some(true) {
+            p["parentId"] = serde_json::Value::Null;
+        }
+        if let Some(order) = input.sort_order {
+            p["sortOrder"] = serde_json::json!(order);
+        }
+        if let Some(subscribed) = input.is_subscribed {
+            p["isSubscribed"] = serde_json::json!(subscribed);
+        }
+        if p.as_object().unwrap().is_empty() {
+            return Err("Provide at least one mailbox change".into());
+        }
+        let mut client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.update_mailbox(&id, p).await?.into())
+    }
+
+    /// Delete a mailbox. Nonempty mailboxes are rejected unless removeEmails is true.
+    async fn delete_mailbox(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        #[graphql(default = false)] remove_emails: bool,
+    ) -> Result<SetResult> {
+        let mut client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.delete_mailbox(&id, remove_emails).await?.into())
+    }
+
+    /// Update the singleton vacation response, preserving omitted settings.
+    async fn set_vacation_response(
+        &self,
+        ctx: &Context<'_>,
+        input: VacationResponseInput,
+    ) -> Result<SetResult> {
+        if (input.clear_from == Some(true) && input.from_date.is_some())
+            || (input.clear_to == Some(true) && input.to_date.is_some())
+        {
+            return Err("Cannot set and clear the same vacation date".into());
+        }
+        let mut p = serde_json::json!({});
+        if let Some(enabled) = input.is_enabled {
+            p["isEnabled"] = serde_json::json!(enabled);
+        }
+        for (key, value) in [
+            ("subject", input.subject),
+            ("textBody", input.text_body),
+            ("htmlBody", input.html_body),
+            ("fromDate", input.from_date),
+            ("toDate", input.to_date),
+        ] {
+            if let Some(value) = value {
+                p[key] = serde_json::json!(value);
+            }
+        }
+        if input.clear_from == Some(true) {
+            p["fromDate"] = serde_json::Value::Null;
+        }
+        if input.clear_to == Some(true) {
+            p["toDate"] = serde_json::Value::Null;
+        }
+        if p.as_object().unwrap().is_empty() {
+            return Err("Provide at least one vacation response change".into());
+        }
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(client.set_vacation_response(p).await?.into())
+    }
+
+    /// Import a base64-encoded RFC 5322 message into a mailbox without sending it.
+    async fn import_email(
+        &self,
+        ctx: &Context<'_>,
+        message_base64: String,
+        mailbox_id: String,
+        keywords: Option<Vec<String>>,
+        received_at: Option<String>,
+    ) -> Result<CreatedRecord> {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(message_base64)?;
+        if bytes.is_empty() {
+            return Err("Message is empty".into());
+        }
+        let keywords = serde_json::Value::Object(
+            keywords
+                .unwrap_or_default()
+                .into_iter()
+                .map(|k| (k, serde_json::json!(true)))
+                .collect(),
+        );
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(CreatedRecord::from(
+            client
+                .import_email(bytes, &mailbox_id, keywords, received_at.as_deref())
+                .await?,
+        ))
+    }
+    /// Star or unstar an email, preserving all other keywords.
+    async fn star_email(
+        &self,
+        ctx: &Context<'_>,
+        email_id: String,
+        starred: bool,
+    ) -> Result<GqlStatus> {
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        client.star_email(&email_id, starred).await?;
+        Ok(GqlStatus {
+            success: true,
+            message: Some(
+                if starred {
+                    "Email starred."
+                } else {
+                    "Email unstarred."
+                }
+                .into(),
+            ),
+            error: None,
+        })
+    }
     /// Compose and send a new email. ALWAYS use action=PREVIEW first, show the user, then CONFIRM or DRAFT with the confirmation_token from the preview.
     async fn send_email(
         &self,
@@ -761,17 +1356,62 @@ impl MutationRoot {
         #[graphql(desc = "The website/domain this masked email is for")] for_domain: Option<String>,
         #[graphql(desc = "A note to remember what this is for")] description: Option<String>,
         #[graphql(desc = "Custom prefix for the email address")] prefix: Option<String>,
+        #[graphql(desc = "Deep link to the related record")] url: Option<String>,
+        #[graphql(default = false)] pending: bool,
     ) -> Result<GqlMaskedEmail> {
         let client = ctx.data::<crate::mcp::graphql::SharedClient>()?;
         let client = client.lock().await;
-        let masked = client
-            .create_masked_email(
-                for_domain.as_deref(),
-                description.as_deref(),
-                prefix.as_deref(),
-            )
-            .await?;
+        let mut properties =
+            serde_json::json!({"state": if pending { "pending" } else { "enabled" }});
+        for (key, value) in [
+            ("forDomain", for_domain),
+            ("description", description),
+            ("emailPrefix", prefix),
+            ("url", url),
+        ] {
+            if let Some(value) = value {
+                properties[key] = serde_json::json!(value);
+            }
+        }
+        let response = client.create_masked_email_options(properties).await?;
+        let masked: crate::models::MaskedEmail =
+            serde_json::from_value(response["created"]["new"].clone())?;
         Ok(GqlMaskedEmail::from(masked))
+    }
+
+    /// Edit Masked Email metadata; omit fields to preserve them.
+    async fn update_masked_email(
+        &self,
+        ctx: &Context<'_>,
+        id: String,
+        for_domain: Option<String>,
+        description: Option<String>,
+        url: Option<String>,
+        #[graphql(default = false)] clear_url: bool,
+    ) -> Result<SetResult> {
+        if clear_url && url.is_some() {
+            return Err("Use url or clearUrl, not both".into());
+        }
+        let mut properties = serde_json::json!({});
+        for (key, value) in [
+            ("forDomain", for_domain),
+            ("description", description),
+            ("url", url),
+        ] {
+            if let Some(value) = value {
+                properties[key] = serde_json::json!(value);
+            }
+        }
+        if clear_url {
+            properties["url"] = serde_json::Value::Null;
+        }
+        if properties.as_object().unwrap().is_empty() {
+            return Err("Provide at least one metadata change".into());
+        }
+        let client = ctx.data::<super::SharedClient>()?.lock().await;
+        Ok(SetResult::from(
+            client.update_masked_email_options(&id, properties).await?,
+        ))
     }
 
     /// Enable a disabled masked email address.
@@ -849,35 +1489,41 @@ impl MutationRoot {
         }
     }
 
-    /// Create a new contact via CardDAV. Requires FASTMAIL_USERNAME and FASTMAIL_APP_PASSWORD.
+    /// Create a contact using JMAP when available, otherwise CardDAV.
     async fn create_contact(
         &self,
+        ctx: &Context<'_>,
         #[graphql(desc = "Full name")] name: String,
         #[graphql(desc = "Email address")] email: Option<String>,
         #[graphql(desc = "Phone number")] phone: Option<String>,
         #[graphql(desc = "Organization/company")] organization: Option<String>,
         #[graphql(desc = "Job title")] title: Option<String>,
         #[graphql(desc = "Notes")] notes: Option<String>,
+        #[graphql(desc = "JMAP address-book ID; omitted uses a writable default")] address_book_id: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let (client, emails, phones) = build_contact_context(ctx, email, phone).await?;
 
         let contact = client
-            .create_contact(&crate::carddav::ContactFields {
-                name: Some(&name),
-                emails: Some(&emails),
-                phones: Some(&phones),
-                organization: organization.as_deref(),
-                title: title.as_deref(),
-                notes: notes.as_deref(),
-            })
+            .create_in(
+                &crate::carddav::ContactFields {
+                    name: Some(&name),
+                    emails: Some(&emails),
+                    phones: Some(&phones),
+                    organization: organization.as_deref(),
+                    title: title.as_deref(),
+                    notes: notes.as_deref(),
+                },
+                address_book_id.as_deref(),
+            )
             .await?;
         Ok(GqlContact::from(contact))
     }
 
-    /// Update an existing contact via CardDAV. Only provided fields are changed; others are preserved.
+    /// Update a contact. Only provided fields are changed; others are preserved.
     async fn update_contact(
         &self,
-        #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Contact ID returned by contacts")] id: String,
         #[graphql(desc = "New full name")] name: Option<String>,
         #[graphql(desc = "New email address (replaces existing)")] email: Option<String>,
         #[graphql(desc = "New phone number (replaces existing)")] phone: Option<String>,
@@ -885,21 +1531,15 @@ impl MutationRoot {
         #[graphql(desc = "New job title")] title: Option<String>,
         #[graphql(desc = "New notes")] notes: Option<String>,
     ) -> Result<GqlContact> {
-        let (client, emails, phones) = build_carddav_context(email, phone)?;
+        let has_email = email.is_some();
+        let has_phone = phone.is_some();
+        let (client, emails, phones) = build_contact_context(ctx, email, phone).await?;
 
-        let emails_ref = if emails.is_empty() {
-            None
-        } else {
-            Some(emails.as_slice())
-        };
-        let phones_ref = if phones.is_empty() {
-            None
-        } else {
-            Some(phones.as_slice())
-        };
+        let emails_ref = has_email.then_some(emails.as_slice());
+        let phones_ref = has_phone.then_some(phones.as_slice());
 
         let contact = client
-            .update_contact(
+            .update(
                 &id,
                 &crate::carddav::ContactFields {
                     name: name.as_deref(),
@@ -914,23 +1554,14 @@ impl MutationRoot {
         Ok(GqlContact::from(contact))
     }
 
-    /// Delete a contact via CardDAV. Cannot be undone!
+    /// Delete a contact using the preferred backend. Cannot be undone!
     async fn delete_contact(
         &self,
-        #[graphql(desc = "Contact ID (UID from the vCard)")] id: String,
+        ctx: &Context<'_>,
+        #[graphql(desc = "Contact ID returned by contacts")] id: String,
     ) -> Result<GqlStatus> {
-        let config = crate::config::Config::load()?;
-        let username = config.get_username().map_err(|_| {
-            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-        })?;
-        let app_password = config.get_app_password().map_err(|_| {
-            async_graphql::Error::new(
-                "App password not configured. Set FASTMAIL_APP_PASSWORD env var.",
-            )
-        })?;
-
-        let client = crate::carddav::CardDavClient::new(username, app_password);
-        match client.delete_contact(&id).await {
+        let (client, _, _) = build_contact_context(ctx, None, None).await?;
+        match client.delete(&id).await {
             Ok(()) => Ok(GqlStatus {
                 success: true,
                 message: Some(format!("Contact {id} deleted.")),
@@ -945,29 +1576,29 @@ impl MutationRoot {
     }
 }
 
-// ============ CardDAV helpers ============
+// ============ Contacts helpers ============
 
-fn build_carddav_context(
+async fn build_contact_context(
+    ctx: &Context<'_>,
     email: Option<String>,
     phone: Option<String>,
 ) -> async_graphql::Result<(
-    crate::carddav::CardDavClient,
+    crate::contacts::ContactsClient,
     Vec<crate::carddav::ContactEmail>,
     Vec<crate::carddav::ContactPhone>,
 )> {
-    let config = crate::config::Config::load()?;
-    let username = config.get_username().map_err(|_| {
-        async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-    })?;
-    let app_password = config.get_app_password().map_err(|_| {
-        async_graphql::Error::new("App password not configured. Set FASTMAIL_APP_PASSWORD env var.")
-    })?;
-
-    let client = crate::carddav::CardDavClient::new(username, app_password);
+    let creds = ctx.data::<super::CardDavCreds>()?;
+    let client = crate::contacts::ContactsClient::for_request(
+        ctx.data::<super::SharedClient>()?.clone(),
+        creds.username.clone(),
+        creds.app_password.clone(),
+    )
+    .await?;
 
     let emails: Vec<crate::carddav::ContactEmail> = email
         .map(|e| {
             e.split(',')
+                .filter(|addr| !addr.trim().is_empty())
                 .map(|addr| crate::carddav::ContactEmail {
                     email: addr.trim().to_string(),
                     label: None,
@@ -979,6 +1610,7 @@ fn build_carddav_context(
     let phones: Vec<crate::carddav::ContactPhone> = phone
         .map(|p| {
             p.split(',')
+                .filter(|num| !num.trim().is_empty())
                 .map(|num| crate::carddav::ContactPhone {
                     number: num.trim().to_string(),
                     label: None,

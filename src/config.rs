@@ -76,8 +76,7 @@ impl Config {
         // Write to a sibling temp file with 0o600, then rename atomically over
         // the target. This closes the TOCTOU window between writing the token
         // and tightening permissions.
-        let tmp_path = path.with_extension("toml.tmp");
-        let _ = fs::remove_file(&tmp_path);
+        let tmp_path = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
         write_private_file(&tmp_path, content.as_bytes()).inspect_err(|_| {
             let _ = fs::remove_file(&tmp_path);
         })?;
@@ -143,7 +142,7 @@ impl Config {
 }
 
 #[cfg(unix)]
-fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     // DirBuilder::mode applies to newly-created directories only. Following up
     // with set_permissions tightens the mode if the directory already existed.
@@ -156,13 +155,13 @@ fn create_private_dir(dir: &Path) -> Result<()> {
 }
 
 #[cfg(not(unix))]
-fn create_private_dir(dir: &Path) -> Result<()> {
+pub(crate) fn create_private_dir(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     Ok(())
 }
 
 #[cfg(unix)]
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = fs::OpenOptions::new()
         .write(true)
@@ -170,16 +169,18 @@ fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
         .mode(0o600)
         .open(path)?;
     file.write_all(contents)?;
+    file.sync_all()?;
     Ok(())
 }
 
 #[cfg(not(unix))]
-fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+pub(crate) fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
     let mut file = fs::OpenOptions::new()
         .write(true)
         .create_new(true)
         .open(path)?;
     file.write_all(contents)?;
+    file.sync_all()?;
     Ok(())
 }
 
@@ -230,5 +231,24 @@ mod tests {
         let toml_str = toml::to_string(&config).unwrap();
         let deserialized: Config = toml::from_str(&toml_str).unwrap();
         assert_eq!(deserialized.core.api_token, Some("test-token".to_string()));
+    }
+
+    #[test]
+    fn legacy_login_credentials_are_ignored_and_not_serialized() {
+        let config: Config = toml::from_str(
+            r#"
+            [core]
+            api_token = "api-token"
+            [oauth]
+            access_token = "old-access-token"
+            refresh_token = "old-refresh-token"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(config.core.api_token.as_deref(), Some("api-token"));
+        let serialized = toml::to_string(&config).unwrap();
+        assert!(!serialized.contains("old-access-token"));
+        assert!(!serialized.contains("old-refresh-token"));
+        assert!(!serialized.contains("[oauth]"));
     }
 }

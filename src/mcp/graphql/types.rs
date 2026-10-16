@@ -676,13 +676,9 @@ pub struct GqlSession {
     /// missing here is one the token cannot use — masked email and submission
     /// are the two that vary by token scope. Empty unless connected.
     pub capabilities: Vec<String>,
-    /// Whether `contacts` can run: CardDAV needs a username and an app
-    /// password, and rejects the API token everything else here uses.
-    ///
-    /// `capabilities` cannot answer this — it lists what the JMAP server
-    /// advertises, and CardDAV is a separate protocol invisible to it. So this
-    /// is the only way to find out short of running the query and failing.
-    /// Check it before planning look-up-a-contact-then-compose.
+    /// Whether credentials for the CardDAV contacts fallback are present.
+    /// Contacts prefer JMAP when `capabilities` includes
+    /// `urn:ietf:params:jmap:contacts`; otherwise this flag describes the fallback.
     ///
     /// True means both credentials are present, not that they are correct.
     /// Independent of `status`: credentials are local configuration, so this

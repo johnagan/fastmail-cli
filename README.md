@@ -7,12 +7,18 @@ CLI for Fastmail. Read, search, send, manage and *watch* email from your termina
 | Feature               | Description                                                            |
 | --------------------- | ---------------------------------------------------------------------- |
 | **Email**             | List, search, read, send, reply, forward, threads, identity selection, HTML bodies, file attachments |
-| **Mailboxes**         | List folders, move emails, mark spam/read                              |
+| **Mailboxes**         | Create, rename, reparent, subscribe, reorder, and delete folders; move emails |
+| **Mail management**   | Mark spam/read, star/unstar, import raw messages, and query search snippets |
+| **Vacation responses** | Read, edit, enable/disable, and schedule out-of-office responses       |
 | **Real-time**         | `fastmail watch` streams arriving mail as NDJSON over JMAP push — pipe it into a shell loop. Also a GraphQL subscription |
-| **Contacts**          | Search, create, update, delete contacts via CardDAV                    |
-| **Calendars**         | CLI: discover calendars, query/read events, create/update/delete events from iCalendar files via CalDAV |
-| **Files**             | CLI: browse, upload, download, create folders, and delete via WebDAV   |
-| **Notes**             | CLI: list, search, read, create, edit plain-text notes, and delete via JMAP |
+| **Contacts**          | JMAP contacts, address books, groups, photos, native JSContact editing, copy and sync; CardDAV fallback |
+| **Calendars**         | CLI + MCP: calendar/event CRUD, recurrence expansion, free/busy and iTIP scheduling via CalDAV |
+| **Files**             | CLI + MCP: browse, upload, download, move/rename/copy, create folders, and delete via WebDAV |
+| **Notes**             | CLI + MCP: list, search, read, edit plain-text/HTML notes and attachments, and delete via JMAP |
+| **Drafts**            | CLI + MCP: list/read, edit, send and discard existing drafts           |
+| **Bulk mail**         | Keywords, flags, mailbox memberships, permanent deletion, and Trash cleanup |
+| **Synchronization**   | Full snapshots and created/updated/deleted changes, with persistent account-bound caches |
+| **API access**        | API-token authentication, account selection, submission tracking/cancellation, identity editing, raw parse/export, push subscriptions |
 | **Attachments**       | Download files, extract text, resize images                            |
 | **Text Extraction**   | 56 formats via [kreuzberg](https://github.com/kreuzberg-dev/kreuzberg) |
 | **Image Resizing**    | `--max-size` to resize images on download                              |
@@ -41,16 +47,16 @@ the data path.
 | Source                                                     | open source (MIT), extensible      | proprietary                      |
 | Email: read / search / threads                             | ✅ (rich search filters)           | ✅                               |
 | Send / reply / forward (preview → confirm/draft)           | ✅                                 | ✅                               |
-| Drafts: edit / send / discard                              | ✅ (MCP)                           | —                                |
+| Drafts: edit / send / discard                              | ✅ (CLI + MCP)                     | —                                |
 | Move / archive / mark read                                 | ✅                                 | ✅                               |
 | Real-time stream of incoming mail                          | ✅ (CLI + GraphQL subscription)    | —                                |
 | Mark as spam (+ trains the filter)                         | ✅                                 | —                                |
 | Masked Email (create / enable / disable / delete)          | ✅                                 | —                                |
 | Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
-| Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
+| Contacts (create / update / delete / search)               | ✅ (JMAP; CardDAV fallback)        | ✅                               |
 | Org directory search                                       | —                                  | ✅                               |
 | Calendar                                                   | ✅ (CLI, CalDAV)                   | ✅                               |
-| Notes                                                      | ✅ (CLI; plain-text editing)        | ✅                               |
+| Notes                                                      | ✅ (CLI + MCP; HTML/attachments)   | ✅                               |
 | Files                                                      | ✅ (CLI, WebDAV)                   | —                                |
 | Identities / signatures                                    | ✅                                 | ✅                               |
 
@@ -97,6 +103,20 @@ The positional form `fastmail auth YOUR_TOKEN` still works for backward compatib
 
 Token is stored in `~/.config/fastmail-cli/config.toml` with `0600` permissions (directory `0700`). The file is written atomically via rename, and the path is refused if it's a symlink.
 
+#### Account selection
+
+```bash
+fastmail accounts
+fastmail --account SHARED_ACCOUNT_ID list mailboxes
+fastmail --account CONTACTS_ACCOUNT_ID contacts list
+```
+
+`--account` is global; `FASTMAIL_ACCOUNT_ID` provides its environment default.
+Otherwise, each capability uses its primary account. The selected account must
+advertise the operation's capability. HTTP MCP/GraphQL accepts
+`X-Fastmail-Account`; cached clients are isolated by token and account.
+`activeAccount(kind: EMAIL)` exposes the effective account through GraphQL.
+
 ### Configuration
 
 Credentials can be set via environment variables or config file. Env vars take precedence.
@@ -104,8 +124,8 @@ Credentials can be set via environment variables or config file. Env vars take p
 **Environment variables:**
 
 ```bash
-export FASTMAIL_API_TOKEN="fmu1-..."      # Required for JMAP (email and notes)
-export FASTMAIL_USERNAME="you@fastmail.com"  # Required for contacts, calendars, files
+export FASTMAIL_API_TOKEN="fmu1-..."      # JMAP: email, notes, contacts, vacation responses
+export FASTMAIL_USERNAME="you@fastmail.com"  # DAV: contact fallback, calendars, files
 export FASTMAIL_APP_PASSWORD="xxxx..."    # App password with the relevant DAV permissions
 ```
 
@@ -120,7 +140,9 @@ username = "you@fastmail.com"
 app_password = "xxxx..."
 ```
 
-The `auth` command only sets `[core].api_token`. For contacts, add `[contacts]` section manually or use env vars.
+The `auth` command only sets `[core].api_token`. JMAP contacts use this token when
+the session advertises `urn:ietf:params:jmap:contacts`. For the CardDAV fallback,
+add the `[contacts]` section manually or use the environment variables.
 
 Calendar and file commands also use `FASTMAIL_USERNAME` and
 `FASTMAIL_APP_PASSWORD`. Generate an app password with **Calendar (CalDAV)** and
@@ -148,6 +170,160 @@ All output is JSON for easy scripting with `jq`.
 ```bash
 fastmail list mailboxes
 ```
+
+### Manage Mailboxes
+
+Use mailbox IDs returned by `mailbox list` for edits, deletion, and parent references.
+
+```bash
+fastmail mailbox list
+fastmail mailbox create Projects --parent PARENT_ID
+fastmail mailbox update MAILBOX_ID --name Work --sort-order 5 --subscribed true
+fastmail mailbox update MAILBOX_ID --root
+fastmail mailbox delete MAILBOX_ID -y
+```
+
+Nonempty mailbox deletion is rejected unless `--remove-emails` is supplied.
+That option removes the mailbox's messages as well.
+
+### Vacation Responses
+
+```bash
+fastmail vacation get
+fastmail vacation set --subject "Out of office" --text-body "Back on Monday." \
+  --from 2026-10-16T00:00:00Z --to 2026-10-20T00:00:00Z --enabled true
+fastmail vacation disable
+fastmail vacation enable
+fastmail vacation set --clear-from --clear-to
+```
+
+Only supplied settings change. Dates are UTC RFC 3339 instants; clearing a date
+removes that bound. Requires the `urn:ietf:params:jmap:vacationresponse` capability.
+
+### Import Raw Messages
+
+```bash
+fastmail import message.eml --mailbox Archive --keyword '$seen' \
+  --received-at 2026-10-16T12:00:00Z
+```
+
+Imports the original RFC 5322 bytes through `Email/import`, without sending the
+message. The default destination is INBOX. Repeat `--keyword` to set more keywords;
+omit `--received-at` to let the server choose the reception time.
+
+### Search Snippets
+
+```bash
+# Search, then fetch query-specific highlighted excerpts
+fastmail snippets --text "project launch" --mailbox INBOX --limit 20
+
+# Fetch snippets for known message IDs using the same search text
+fastmail snippets --text "project launch" --email-id EMAIL_ID
+```
+
+Returns the `SearchSnippet/get` result, including `list` and `notFound`.
+Snippets may contain server-generated highlight markup.
+
+### Star / Unstar
+
+```bash
+fastmail star EMAIL_ID
+fastmail unstar EMAIL_ID
+fastmail search --flagged
+```
+
+Changes only `$flagged`, preserving read state and all other keywords.
+
+### Bulk Mail, Tags, Memberships, and Deletion
+
+```bash
+fastmail email update EMAIL_ID OTHER_ID --add-keyword project --remove-keyword '$answered'
+fastmail email update EMAIL_ID OTHER_ID --read true --starred false
+fastmail email update EMAIL_ID --add-mailbox ARCHIVE_ID --remove-mailbox INBOX_ID
+fastmail email update EMAIL_ID OTHER_ID --move-to DESTINATION_ID
+fastmail email delete EMAIL_ID OTHER_ID -y
+fastmail email empty-trash -y
+fastmail email export EMAIL_ID --output message.eml
+fastmail email parse message.eml
+fastmail --account DESTINATION_ACCOUNT email copy SOURCE_ACCOUNT copies.json
+```
+
+Keyword and membership patches preserve unmentioned values. `--move-to` replaces
+memberships; mailbox references here are IDs. Bulk writes respect the server's
+`maxObjectsInSet` and return per-record errors. If some records fail, the CLI
+returns `success:false`, retains the result/error maps in `data`, and exits with
+status 1. Operations across multiple requests are not atomic.
+
+`email delete` permanently destroys the specified messages. `empty-trash`
+destroys messages that are only in Trash; messages in other folders retain those
+memberships and are removed from Trash. Each cleanup batch checks the current
+state before writing. Export saves the original message bytes, refusing an
+existing destination unless `--overwrite` is supplied. Parse uploads a message
+for `Email/parse` without importing or sending it.
+
+Copy files are native creation-ID maps, for example
+`{"copy1":{"id":"SOURCE_EMAIL_ID","mailboxIds":{"DESTINATION_MAILBOX_ID":true}}}`.
+`--destroy-original` requests removal from the source after successful copying.
+
+### Identities and Submission Tracking
+
+```bash
+fastmail identities list
+fastmail identities update IDENTITY_ID --name 'My Name' --text-signature 'Regards'
+fastmail identities update IDENTITY_ID --html-signature '<b>Regards</b>' --reply-to reply@example.com
+fastmail submissions list --limit 50
+fastmail submissions get SUBMISSION_ID OTHER_ID
+fastmail submissions query submission-query.json
+fastmail submissions cancel SUBMISSION_ID
+```
+
+Submission records include `sendAt`, `undoStatus`, and server-provided delivery
+status. Cancellation sets `undoStatus` to `canceled`; the server rejects it if
+the message is no longer cancellable. Identity mutations preserve omitted fields
+and are subject to server policy. An empty `--reply-to` or `--bcc` clears the list.
+
+### Full Changes and Persistent Synchronization
+
+```bash
+fastmail state email
+fastmail changes email STATE
+fastmail query-changes email original-query-with-sinceQueryState.json
+fastmail query mailbox mailbox-query.json
+fastmail sync email --cache ./cache/emails.json
+fastmail sync contact --cache ./cache/contacts.json --watch 60
+```
+
+Supported state/change/cache types: `email`, `mailbox`, `thread`, `identity`,
+`submission`, `contact`, and `addressbook`. Query/queryChanges support `email`,
+`mailbox`, `submission`, and `contact`; JSON files contain the native arguments.
+Manual change calls return one protocol page; follow `hasMoreChanges` with the
+returned `newState`.
+
+`sync` maintains a private JSON snapshot containing complete returned records,
+account identity, type, and cursor. It follows all changes pages, reconciles
+updates/deletions, replays changes that occurred during initial enumeration, and
+rebuilds after `cannotCalculateChanges`. Enumeration uses anchors to tolerate
+arrivals and removals before the current page. Cursor updates are atomic and
+are saved only after successful reconciliation. Cache files are bound to their
+account/type and locked against concurrent writers. `--watch SECONDS` repeats
+the same reconciliation until interrupted. This is a one-way local snapshot;
+attachment blobs remain on the server and local JSON edits are not uploaded.
+
+### Push Subscriptions
+
+```bash
+fastmail push list
+fastmail push create push.json
+fastmail push update SUBSCRIPTION_ID verification.json
+fastmail push delete SUBSCRIPTION_ID
+```
+
+Creation/update files use native `PushSubscription` fields such as
+`deviceClientId`, `url`, `types`, `keys`, `expires`, and `verificationCode`.
+Deliver and acknowledge verification codes through your push receiver before
+expecting notifications. These subscriptions are session-scoped; account
+selection does not add an `accountId` to their requests. `fastmail watch`
+continues to provide SSE-based arrival watching independently.
 
 ### List Emails
 
@@ -196,6 +372,24 @@ fastmail search --from "boss" --has-attachment --after 2024-06-01 --limit 20
 ```
 
 Available flags: `--text`, `--from`, `--to`, `--cc`, `--bcc`, `--subject`, `--body`, `--mailbox`, `--has-attachment`, `--min-size`, `--max-size`, `--before`, `--after`, `--unread`, `--flagged`
+
+#### Nested filters and pagination
+
+`--filter` accepts native JMAP filter JSON; `--filter-file` reads it from a file.
+Use `AND`, `OR`, and `NOT` operators to nest conditions. Mailbox references inside
+the JSON are IDs; `--mailbox` remains a name/role and is ANDed with the JSON.
+Native conditions also support `header`, `hasKeyword`, and thread-keyword filters.
+
+```bash
+fastmail search --filter '{"operator":"OR","conditions":[{"from":"alice@example.com"},{"from":"bob@example.com"}]}' \
+  --mailbox INBOX --sort '[{"property":"size","isAscending":false}]' --total
+fastmail search --filter-file filter.json --anchor EMAIL_ID --anchor-offset 1 --limit 25
+fastmail search --position -25 --collapse-threads
+```
+
+Advanced queries return `{emails, ids, position, total, queryState}` in `data`.
+`total` is requested only with `--total`; ordinary flag-only search retains its
+existing output format. Anchors are email IDs in the same filtered/sorted query.
 
 ### Watch for New Mail
 
@@ -387,15 +581,21 @@ fastmail completions fish > ~/.config/fish/completions/fastmail.fish
 
 ### Contacts
 
-CRUD operations for Fastmail contacts via CardDAV. Requires an app password (API tokens don't work for CardDAV).
+Contact CRUD prefers JMAP (RFC 9610) using the API token. When no API token is
+configured, or the session does not advertise JMAP contacts, `auto` uses CardDAV.
+Choose `--backend jmap` to require JMAP, or `--backend carddav` to explicitly use
+the retained CardDAV implementation. Authentication/server errors on JMAP are
+reported directly rather than retried on another backend.
 
 ```bash
-# Set credentials
+# Optional CardDAV fallback credentials
 export FASTMAIL_USERNAME="you@fastmail.com"
 export FASTMAIL_APP_PASSWORD="your-app-password"
 
 # List all contacts
 fastmail contacts list
+fastmail contacts --backend jmap list
+fastmail contacts --backend carddav list
 
 # Search by name, email, or organization
 fastmail contacts search "alice"
@@ -411,6 +611,80 @@ fastmail contacts delete CONTACT_ID -y
 ```
 
 Generate an app password at [Fastmail Settings > Privacy & Security > Integrations > App passwords](https://app.fastmail.com/settings/security/devicekeys).
+
+JMAP creates contacts in the writable default address book, falling back to the
+first writable book. Lists/searches follow all query pages. Output keeps the
+existing contact shape; JMAP IDs are `ContactCard.id` values, while CardDAV IDs
+are vCard UIDs. Use IDs with the same backend that returned them. Unspecified
+update fields are preserved; `--email ''` and `--phone ''` clear those lists.
+
+#### Address books and full JSContact data
+
+The following commands require JMAP, including when the default backend is `auto`.
+
+```bash
+fastmail contacts get CONTACT_ID
+fastmail contacts addressbooks list
+fastmail contacts addressbooks get BOOK_ID
+fastmail contacts addressbooks create Team --description 'Team contacts'
+fastmail contacts addressbooks update BOOK_ID book-patch.json
+fastmail contacts addressbooks default BOOK_ID
+fastmail contacts addressbooks subscribe BOOK_ID --subscribed false
+fastmail contacts addressbooks delete BOOK_ID -y
+fastmail contacts create --name Alice --email alice@example.com --address-book BOOK_ID
+
+fastmail contacts card-create card.json --address-book BOOK_ID
+fastmail contacts card-update CONTACT_ID card-patch.json
+fastmail contacts photo CONTACT_ID portrait.png
+fastmail contacts details CONTACT_ID --birthday 1990-01-02 \
+  --address '123 Test St, Example City' --country-code US --nickname Ally
+fastmail contacts details CONTACT_ID --clear-birthday --clear-address
+fastmail contacts group-create Team --member PERSON_UID --address-book BOOK_ID
+fastmail contacts group-members GROUP_ID --member PERSON_UID --member OTHER_UID
+```
+
+`get` returns the native `ContactCard/get` response. `card-create` accepts a JSContact
+Card; the CLI supplies `@type`, version, and a new UID if omitted, and chooses a
+writable default book when no membership is supplied. `card-update` accepts a JMAP
+PatchObject, preserving omitted properties. Native files can represent all
+JSContact fields: structured names, addresses, anniversaries/birthdays, media,
+groups, and custom properties. For example, a patch can contain:
+
+```json
+{"name/full":"Alice Smith","anniversaries/birthday":{"kind":"birth","date":{"@type":"PartialDate","year":1990,"month":3,"day":15}}}
+```
+
+Group members are **contact UIDs**, not ContactCard IDs; `contacts get` exposes
+both. `group-members` replaces the member set. Photos upload into the contacts
+account and retain non-photo media. Address-book update files accept writable
+properties such as `name`, `description`, `sortOrder`, `isSubscribed`, and
+`shareWith`. Deleting a nonempty book requires `--remove-contents`; contacts
+belonging to no other book are then destroyed.
+
+#### Contact query, copy, and synchronization
+
+```bash
+fastmail contacts query query.json
+fastmail contacts state
+fastmail contacts changes STATE --max-changes 100
+fastmail contacts addressbooks state
+fastmail contacts addressbooks changes STATE --max-changes 100
+fastmail contacts query-changes query-changes.json
+fastmail contacts copy SOURCE_ACCOUNT_ID copies.json
+```
+
+Query files contain native `ContactCard/query` arguments, such as
+`{"filter":{"kind":"group"},"limit":50,"calculateTotal":true}`. They support
+sorting, filters, anchors, and positions. Query-changes files include
+`sinceQueryState` and the original filter/sort arguments. The selected primary
+contacts account supplies `accountId`.
+
+Changes return one protocol page, including creations, updates, deletions,
+`newState`, and `hasMoreChanges`. Keep requesting with `newState` until
+`hasMoreChanges` is false before persisting your cursor. A discarded history
+(`cannotCalculateChanges`) requires a fresh snapshot. Copy files are creation-ID
+maps, e.g. `{"copy1":{"id":"SOURCE_CONTACT_ID","addressBookIds":{"DEST_BOOK_ID":true}}}`.
+`--destroy-original` requests removal from the source after successful copying.
 
 ### Calendars
 
@@ -436,10 +710,34 @@ fastmail calendar delete '/dav/calendars/user/you@fastmail.com/CALENDAR_ID/EVENT
 Events are returned in `calendarData` as complete iCalendar text, including
 recurrence rules and time-zone definitions. Queries return matching calendar
 resources rather than expanding recurring events into individual occurrences.
+Pass `--expand` with both `--after` and `--before` to request server-side recurrence
+expansion instead.
 Create/update accept complete UTF-8 `.ics` files containing `VCALENDAR` and
 `VEVENT`. Updates replace the whole resource; preserve its UID when editing.
 An outdated ETag produces an HTTP 412 error so you can fetch the current event
 before retrying. Deletes optionally accept `--etag` too.
+
+Calendar collections, availability, and scheduling:
+
+```bash
+fastmail calendar create-calendar '/dav/calendars/user/you@fastmail.com/work/' \
+  --name Work --description 'Work events' --color '#336699'
+fastmail calendar update-calendar CALENDAR_HREF --name Projects
+fastmail calendar delete-calendar CALENDAR_HREF -y
+fastmail calendar events CALENDAR_HREF --expand --after 20261001T000000Z --before 20261101T000000Z
+fastmail calendar free-busy CALENDAR_HREF --after 20261001T000000Z --before 20261101T000000Z
+fastmail calendar scheduling
+fastmail calendar schedule reply.ics --outbox OUTBOX_HREF \
+  --originator mailto:you@fastmail.com --recipient mailto:organizer@example.com
+```
+
+`scheduling` discovers the principal, inbox, outbox, and calendar-user addresses.
+`schedule` sends a complete iTIP VCALENDAR/VEVENT with a `METHOD` such as REQUEST,
+REPLY, or CANCEL; retain event UID, organizer, attendees, and sequence in the file.
+It returns per-recipient `requestStatus` values, which callers must inspect.
+Free/busy returns iCalendar VFREEBUSY data. These operations use the server's
+CalDAV support; unsupported methods/properties are returned as errors. Calendar
+deletion removes the collection and its events.
 
 ### Files
 
@@ -454,11 +752,16 @@ fastmail files mkdir /Reports
 fastmail files upload ./report.pdf '/Reports/Quarterly report.pdf'
 fastmail files list /Reports/
 fastmail files download '/Reports/Quarterly report.pdf' --output ./report-copy.pdf
+fastmail files copy '/Reports/Quarterly report.pdf' '/Reports/Backup.pdf'
+fastmail files move '/Reports/Backup.pdf' '/Reports/Renamed.pdf'
 fastmail files delete '/Reports/Quarterly report.pdf' -y
 ```
 
 Uploads and downloads refuse to replace existing files unless you pass
 `--overwrite`. Deleting a folder with `-y` removes its contents too.
+Move/copy are server-side and also work for folders; `files rename` is an alias
+for `files move`. Replacing a destination requires `--overwrite`. Partial DAV
+failures are reported as errors.
 
 ### Notes
 
@@ -473,18 +776,26 @@ fastmail notes search 'shopping' --limit 10
 fastmail notes get NOTE_ID
 fastmail notes create --title 'Shopping list' --body $'Coffee\nBread'
 fastmail notes update NOTE_ID --body $'Coffee\nBread\nMilk'
+fastmail notes create --title 'Rich note' --html-body '<b>Important</b>' -a photo.png
+fastmail notes update NOTE_ID --html-file note.html
+fastmail notes update NOTE_ID --attachment report.pdf
+fastmail notes update NOTE_ID --clear-attachments
 fastmail notes delete NOTE_ID -y
 ```
 
-Get returns the message's `textBody`, `htmlBody`, and `bodyValues`. Create writes
-plain-text notes with Apple note identifiers. Update supports single-part
-plain-text notes and preserves their UUID and keywords, including pinned status;
-edit rich-text or attachment-bearing notes in Fastmail. An update saves a new
-message before deleting the old one and returns a **new note ID**. Delete is
-permanent and requires `-y`.
+Get returns the message's `textBody`, `htmlBody`, attachments, and `bodyValues`.
+Create accepts plain text, HTML, and attachments. Update preserves omitted bodies,
+mailbox memberships, the UUID, and keywords (including pinned status). Supplying
+a new plain-text body drops the old HTML alternative unless new HTML is supplied
+too. Attachment flags replace regular attachments; `--clear-attachments` removes
+them, while referenced inline images are retained. `--attachment-manifest` also
+accepts uploaded blobs. Incomplete/truncated bodies are rejected before replacement.
+An update saves a new message before deleting the old one and returns a **new note
+ID**. Delete is permanent and requires `-y`.
 
-Calendar, file, and note commands are currently CLI features. Use the CLI for
-these operations; their commands are not exposed through MCP/GraphQL yet.
+Calendars, files, and notes are also available through MCP/GraphQL. DAV fields
+use request-scoped username/app-password credentials, falling back to `[dav]`
+and then `[contacts]` configuration for local use. Notes use JMAP credentials.
 
 ### Masked Email
 
@@ -499,6 +810,10 @@ fastmail masked create --domain "https://example.com" --description "Example Sit
 
 # Create with custom prefix
 fastmail masked create --prefix "shopping" --description "Shopping sites"
+fastmail masked create --pending --url 'passwordmanager://record/123'
+fastmail masked update MASKED_EMAIL_ID --description 'New description' --domain https://example.com
+fastmail masked update MASKED_EMAIL_ID --url 'passwordmanager://record/456'
+fastmail masked update MASKED_EMAIL_ID --clear-url
 
 # Enable/disable a masked email
 fastmail masked enable MASKED_EMAIL_ID
@@ -507,6 +822,41 @@ fastmail masked disable MASKED_EMAIL_ID
 # Delete (requires confirmation)
 fastmail masked delete MASKED_EMAIL_ID -y
 ```
+
+Metadata updates preserve omitted fields and do not change the address's state.
+Pending addresses auto-enable on receiving mail; unused pending addresses expire
+after 24 hours. GraphQL `createMaskedEmail` also accepts `pending` and `url`, and
+`updateMaskedEmail` edits metadata.
+
+### Existing Drafts and Reusable Uploads
+
+```bash
+fastmail drafts list --limit 25
+fastmail drafts get DRAFT_ID
+fastmail drafts update DRAFT_ID --subject 'Revised' --body 'New body'
+fastmail drafts update DRAFT_ID --cc '' --clear-attachments
+fastmail drafts send DRAFT_ID
+fastmail drafts delete DRAFT_ID -y
+
+fastmail upload-attachment report.pdf > upload.json
+fastmail send --to alice@example.com --subject Report --body Attached \
+  --attachment-manifest upload.json
+fastmail drafts update DRAFT_ID --attachment-manifest upload.json
+```
+
+Draft edits preserve omitted fields and return a **new draft ID**; use it for
+subsequent operations. `drafts delete` (alias `discard`) moves drafts to Trash.
+Non-drafts are rejected. Upload returns `{name, contentType, blobId, size}` inside
+the standard envelope. Manifest files accept that envelope, the bare object, or
+an array of such objects; they reference existing blobs without re-uploading.
+Repeat `--attachment-manifest` to attach more. Send, reply, forward, draft updates,
+and notes accept manifests alongside local `--attachment` files. Blobs must be
+available in the same account and within the server's upload retention period.
+
+Native contacts are also exposed through GraphQL typed results with JSON inputs: `contactCards`,
+`queryContactCards`, `contactChanges`, `contactQueryChanges`, `addressBookRecords`,
+`createContactCard`, `updateContactCard`, `setAddressBooks`, `copyContactCards`, and
+`setContactPhoto`. Use `schema_sdl` to inspect selection fields and native JSON input shapes.
 
 ## Output Format
 
@@ -547,7 +897,7 @@ Copy the skills into your project's `.claude/skills/` directory (or anywhere Cla
 /fastmail/conversations # list, get, thread, mark-read, triage
 /fastmail/attachments  # download, raw vs json, text extraction
 /fastmail/masked       # masked email CRUD
-/fastmail/contacts     # CardDAV setup, list/search
+/fastmail/contacts     # contact setup, list/search
 ```
 
 Skills are in `.claude/skills/` in this repo. Each one includes concrete examples and agent-oriented workflow patterns.
@@ -578,7 +928,8 @@ Configure in Claude Desktop's `claude_desktop_config.json`:
 }
 ```
 
-Username and app password are optional - only needed for contact search (CardDAV requires app password, API tokens don't work).
+Username and app password are optional, used for the CardDAV contacts fallback.
+JMAP contacts use the API token when the contacts capability is advertised.
 
 ### HTTP transport
 
@@ -640,8 +991,8 @@ the JMAP session handshake runs once per distinct token rather than per call.
 | `X-Fastmail-Username`      | `FASTMAIL_USERNAME`     | contacts (CardDAV)      |
 | `X-Fastmail-App-Password`  | `FASTMAIL_APP_PASSWORD` | contacts (CardDAV)      |
 
-Contacts take two headers rather than riding on the token because CardDAV is a
-separate protocol that rejects API tokens outright. Each resolves on its own: a
+JMAP contacts use `X-Fastmail-Token`. The CardDAV fallback needs the two other
+headers because that protocol rejects API tokens. Each resolves on its own: a
 request carrying a username header but no password gets exactly that — half a
 credential, which `session { carddavConfigured }` reports as `false` — rather
 than quietly completing itself from the host's local config and mixing two
@@ -686,14 +1037,75 @@ catch. When connected it also reports the accounts the token reaches and the
 capability URNs it was granted, which is what says whether masked email and
 sending are available at all.
 
-`carddavConfigured` is the one thing there that `capabilities` cannot answer.
-Capabilities are what the JMAP server advertises, and contacts go over CardDAV —
-a separate protocol, with separate credentials, invisible to the handshake. So
-without it the only way to find out that `contacts` is unavailable is to run it
-and fail, halfway through a plan that assumed it. It reports whether a username
-and app password are both present, not whether they are correct, and it answers
-independently of `status`: credentials are local configuration, so a dead API
-token doesn't make contact reachability unanswerable.
+Contacts prefer JMAP when `capabilities` includes `urn:ietf:params:jmap:contacts`.
+Otherwise, `carddavConfigured` reports whether credentials for the CardDAV
+fallback are present. It does not validate those credentials and is independent
+of the JMAP connection status.
+
+#### Mailbox, vacation, import, snippets, and stars over GraphQL
+
+These operations are also available through MCP's `graphql` tool. Management
+operations return typed objects with selectable fields. Native record properties
+and arbitrary protocol input objects remain available as JSON fields.
+
+```graphql
+mutation { createMailbox(name: "Projects") { id } }
+mutation { updateMailbox(id: "MAILBOX_ID", input: {name: "Work", isSubscribed: true}) { success updated } }
+mutation { deleteMailbox(id: "MAILBOX_ID", removeEmails: false) { success destroyed } }
+{ vacationResponse { isEnabled subject textBody } }
+mutation { setVacationResponse(input: {isEnabled: true, textBody: "Back Monday."}) { success } }
+mutation { importEmail(messageBase64: "BASE64_RFC5322_BYTES", mailboxId: "MAILBOX_ID") { id blobId } }
+{ searchSnippets(text: "project", emailIds: ["EMAIL_ID"]) { snippets { emailId subject preview } notFound } }
+{ addressBooks { id name isDefault myRights { mayWrite } } }
+mutation { starEmail(emailId: "EMAIL_ID", starred: true) { success } }
+mutation { starEmail(emailId: "EMAIL_ID", starred: false) { success } }
+```
+
+#### Bulk mail, synchronization, calendars, and files over GraphQL
+
+```graphql
+mutation { patchEmails(ids: ["EMAIL_ID", "OTHER_ID"], keywords: {project: true}) {
+  success updated notUpdated { id kind description }
+} }
+mutation { destroyEmails(ids: ["EMAIL_ID"]) { success destroyed notDestroyed { id kind } } }
+mutation { emptyTrash { success updated destroyed } }
+mutation { updateIdentity(id: "IDENTITY_ID", patch: {textSignature: "Regards"}) { success } }
+{ submissions(arguments: {limit: 20, filter: {undoStatus: "pending"}}) { ids queryState } }
+{ records(kind: SUBMISSION, ids: ["SUBMISSION_ID"]) { records { id properties } notFound } }
+mutation { cancelSubmissions(ids: ["SUBMISSION_ID"]) { success updated notUpdated { id kind } } }
+{ changes(kind: EMAIL, sinceState: "STATE") { newState hasMoreChanges created updated destroyed } }
+{ queryChanges(kind: EMAIL, arguments: {sinceQueryState: "QUERY_STATE"}) {
+  newQueryState removed added { id index }
+} }
+{ rawEmail(id: "EMAIL_ID") { base64 size } }
+{ pushSubscriptions { records { id properties } } }
+{ contactCards(ids: ["CONTACT_ID"]) { state records { id properties } notFound } }
+{ notes(limit: 10) { total notes { id subject preview } } }
+{ note(id: "NOTE_ID") { id uuid textBody htmlBody attachments { name contentType blobId } } }
+mutation { createNote(title: "Notes", htmlBody: "<b>Important</b>") { id } }
+{ calendars { href name etag } }
+{ calendarEvents(calendar: "CALENDAR_HREF", after: "20300101T000000Z", before: "20300201T000000Z", expand: true) {
+  href etag calendarData
+} }
+{ files(path: "/Reports/") { path name collection size etag } }
+{ fileDownload(path: "/Reports/report.pdf") { base64 size } }
+mutation { uploadFile(path: "/hello.txt", base64: "aGVsbG8=") { success href etag } }
+mutation { transferFile(source: "/hello.txt", destination: "/copy.txt", copy: true) { success href } }
+```
+
+`SetResult` separates successful IDs from per-record errors. Arbitrary keyword
+names (including `$` or `/`) can be supplied through GraphQL JSON variables.
+`records(kind: SUBMISSION)` exposes delivery-status fields in each record's
+`properties`. Native record properties remain JSON so extensions and full
+JSContact data are preserved. `copyEmails`, `parseEmail`, `setPushSubscriptions`,
+calendar collection/event mutations, free/busy, scheduling, folder creation,
+and file deletion are also available; inspect `schema_sdl` for their arguments.
+
+Calendar/file requests use `X-Fastmail-Username` and `X-Fastmail-App-Password`,
+or local DAV configuration. DAV resolvers use the credentials injected for that
+request. `putCalendarEvent` creates an absent event by
+default; supply its current `etag` to replace it conditionally. Scheduling
+returns per-recipient statuses to inspect.
 
 The MCP server exposes **2 tools** via a GraphQL interface:
 
@@ -961,6 +1373,39 @@ RUST_LOG=debug fastmail list mailboxes
 This CLI talks directly to Fastmail's JMAP server — the protocol layer is hand-rolled, there's no JMAP client library in the dependency tree. Capabilities are filtered dynamically based on your API token's permissions — read-only tokens work fine for listing/reading, while send and masked email operations require appropriate capabilities.
 
 For more on JMAP: [jmap.io](https://jmap.io/)
+
+## Verification
+
+```bash
+cargo test
+cargo clippy --all-targets -- -D warnings
+```
+
+`tests/live_fastmail.rs` contains ignored tests for actual Fastmail behavior.
+They are opt-in and use your configured credentials. Run the read-only check with:
+
+```bash
+cargo test --test live_fastmail live_session_and_mailbox_reads -- --ignored
+```
+
+With credentials for a test account, enable the temporary contact/photo/rich-note
+and calendar/recurrence/free-busy/file round trips individually:
+
+```bash
+FASTMAIL_LIVE_WRITE_TESTS=1 cargo test --test live_fastmail live_contact_media_and_rich_notes -- --ignored
+FASTMAIL_LIVE_WRITE_TESTS=1 cargo test --test live_fastmail live_dav_files_recurrence_and_freebusy -- --ignored
+```
+
+These create uniquely named resources and attempt cleanup. Scheduling sends a
+REQUEST and CANCEL to an explicitly supplied test recipient, so it has additional
+inputs:
+
+```bash
+FASTMAIL_LIVE_WRITE_TESTS=1 FASTMAIL_LIVE_SCHEDULING=1 \
+FASTMAIL_LIVE_ORIGINATOR=mailto:you@fastmail.com \
+FASTMAIL_LIVE_RECIPIENT=mailto:calendar-test@example.com \
+cargo test --test live_fastmail live_itip_scheduling -- --ignored
+```
 
 ## License
 

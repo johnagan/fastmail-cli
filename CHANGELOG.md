@@ -4,6 +4,46 @@
 
 ### Added
 
+- Bulk email keyword/flag/membership patches, permanent deletion, Trash cleanup
+  that preserves other mailbox memberships, cross-account copy, parse, and raw
+  `.eml` export. Writes honor server batch limits and retain per-record failures.
+- Identity name/signature/reply-to/BCC edits and submission query/get/cancellation.
+- Full state/change/query-change access and account-bound persistent sync caches
+  for mail, folders, threads, identities, submissions, contacts, and address books.
+- Global `--account` / `FASTMAIL_ACCOUNT_ID` and HTTP `X-Fastmail-Account`, with
+  account-isolated pooled clients.
+- PushSubscription list/create/update/delete and verification-code management.
+- Calendar and file queries/mutations over MCP/GraphQL using request-scoped DAV
+  credentials, and common contact detail flags for birthdays/addresses/nicknames.
+- Typed GraphQL management, synchronization, note, address-book, calendar, file,
+  parse, and snippet results. JSON remains available for arbitrary record properties
+  and native input objects; management operations now require selection sets.
+- Opt-in live integration tests for contact media, rich notes, DAV file operations,
+  recurring events/free-busy, and scheduling.
+- Native JMAP contact/address-book operations: full JSContact JSON, explicit
+  book selection, groups, photo uploads, copy, queries/query changes, and state
+  synchronization. CardDAV CRUD remains available.
+- Masked Email metadata updates, deep-link URLs, and pending creation.
+- CalDAV calendar collection management, recurrence expansion, free/busy queries,
+  scheduling discovery, and iTIP outbox requests.
+- WebDAV server-side move/rename/copy, with explicit overwrite behavior and
+  partial-failure reporting.
+- Rich HTML notes and attachment replacement, retaining UUIDs, flags, memberships,
+  and referenced inline images. Notes are also exposed through MCP/GraphQL.
+- Terminal draft list/get/edit/send/discard commands, nested native JMAP search
+  filters, sorting, anchors, totals, and collapsed-thread results.
+- `upload-attachment` and reusable attachment manifests for send/reply/forward,
+  drafts, and notes.
+- Mailbox create/update/delete commands and GraphQL mutations, including parent,
+  subscription, and sort-order changes.
+- Vacation-response get/set/enable/disable commands and GraphQL operations.
+- Raw RFC 5322 message import via `.eml` files (CLI) or base64 (GraphQL).
+- Query-specific search snippets via CLI and GraphQL.
+- `star` / `unstar` commands and the `starEmail` GraphQL mutation, preserving
+  other keywords.
+- JMAP contacts (RFC 9610) for CLI and MCP/GraphQL contact CRUD. JMAP is preferred;
+  CardDAV remains the fallback and can be selected with `contacts --backend carddav`.
+  JMAP address books are discoverable through the `addressBooks` GraphQL query.
 - `calendar` commands for CalDAV discovery, event queries, and iCalendar
   create/update/delete. Updates use ETags to detect concurrent edits.
 - `files` commands for WebDAV browsing, upload/download, folder creation, and

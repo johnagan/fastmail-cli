@@ -6,10 +6,57 @@ use std::path::PathBuf;
 
 #[derive(Subcommand)]
 pub enum CalendarCommands {
+    /// Create a calendar collection at the given href
+    CreateCalendar {
+        href: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+    },
+    UpdateCalendar {
+        href: String,
+        #[arg(long)]
+        name: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long)]
+        color: Option<String>,
+    },
+    /// Delete a calendar and its events
+    DeleteCalendar {
+        href: String,
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
+    FreeBusy {
+        calendar: String,
+        #[arg(long)]
+        after: String,
+        #[arg(long)]
+        before: String,
+    },
+    /// Discover scheduling inbox, outbox, and calendar-user addresses
+    Scheduling,
+    /// Send an iTIP .ics REQUEST, REPLY, or CANCEL through the scheduling outbox
+    Schedule {
+        file: PathBuf,
+        #[arg(long)]
+        outbox: String,
+        #[arg(long)]
+        originator: String,
+        #[arg(long = "recipient", required = true)]
+        recipients: Vec<String>,
+    },
     /// List calendars and their CalDAV hrefs
     List,
-    /// List events as iCalendar data (recurring events are not expanded)
+    /// List events as iCalendar data (use --expand for recurrence instances)
     Events {
+        /// Expand recurring events within --after/--before on the server
+        #[arg(long)]
+        expand: bool,
         calendar: String,
         /// UTC lower bound, e.g. 20261016T000000Z
         #[arg(long)]
@@ -41,6 +88,21 @@ pub enum CalendarCommands {
 
 #[derive(Subcommand)]
 pub enum FilesCommands {
+    /// Server-side move or rename
+    #[command(alias = "rename")]
+    Move {
+        source: String,
+        destination: String,
+        #[arg(long)]
+        overwrite: bool,
+    },
+    /// Server-side copy (including folders)
+    Copy {
+        source: String,
+        destination: String,
+        #[arg(long)]
+        overwrite: bool,
+    },
     /// List files and folders (paths are relative to your Fastmail Files root)
     List {
         #[arg(default_value = "/")]
@@ -86,20 +148,38 @@ pub enum NotesCommands {
     },
     /// Read a note, including body values
     Get { id: String },
-    /// Create a plain-text note
+    /// Create a plain-text or HTML note with optional attachments
     Create {
         #[arg(long)]
         title: String,
         #[arg(long)]
-        body: String,
+        body: Option<String>,
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+        #[arg(long)]
+        html_file: Option<String>,
+        #[arg(short = 'a', long = "attachment")]
+        attachments: Vec<String>,
+        #[arg(long = "attachment-manifest")]
+        attachment_manifests: Vec<String>,
     },
-    /// Replace a plain-text note; returns a new message ID
+    /// Edit a rich note; returns a new message ID
     Update {
         id: String,
         #[arg(long)]
         title: Option<String>,
         #[arg(long)]
         body: Option<String>,
+        #[arg(long, conflicts_with = "html_file")]
+        html_body: Option<String>,
+        #[arg(long)]
+        html_file: Option<String>,
+        #[arg(short = 'a', long = "attachment", conflicts_with = "clear_attachments")]
+        attachments: Vec<String>,
+        #[arg(long = "attachment-manifest", conflicts_with = "clear_attachments")]
+        attachment_manifests: Vec<String>,
+        #[arg(long)]
+        clear_attachments: bool,
     },
     /// Permanently delete a note
     Delete {
@@ -135,19 +215,85 @@ async fn calendar_file(file: &PathBuf) -> Result<Vec<u8>> {
 }
 
 pub async fn calendar(command: CalendarCommands) -> Result<()> {
-    if let CalendarCommands::Delete { yes, .. } = &command {
+    if let CalendarCommands::Delete { yes, .. } | CalendarCommands::DeleteCalendar { yes, .. } =
+        &command
+    {
         confirm(*yes)?;
     }
     let client = dav_client("https://caldav.fastmail.com/")?;
     let result = match command {
+        CalendarCommands::CreateCalendar {
+            href,
+            name,
+            description,
+            color,
+        } => {
+            client
+                .create_calendar(&href, &name, description.as_deref(), color.as_deref())
+                .await?;
+            json!({"href": href})
+        }
+        CalendarCommands::UpdateCalendar {
+            href,
+            name,
+            description,
+            color,
+        } => {
+            ensure!(
+                href.ends_with('/'),
+                "Use a calendar collection href ending with /"
+            );
+            client
+                .update_calendar(
+                    &href,
+                    name.as_deref(),
+                    description.as_deref(),
+                    color.as_deref(),
+                )
+                .await?;
+            json!({"href": href})
+        }
+        CalendarCommands::DeleteCalendar { href, .. } => {
+            let calendars = client.calendars().await?;
+            ensure!(
+                calendars.iter().any(|c| c.href == href),
+                "Use a calendar href returned by calendar list"
+            );
+            client.delete(&href, None).await?;
+            json!({"deleted": href})
+        }
+        CalendarCommands::FreeBusy {
+            calendar,
+            after,
+            before,
+        } => json!({"calendarData": client.free_busy(&calendar, &after, &before).await?}),
+        CalendarCommands::Scheduling => client.scheduling().await?,
+        CalendarCommands::Schedule {
+            file,
+            outbox,
+            originator,
+            recipients,
+        } => {
+            let data = calendar_file(&file).await?;
+            let text = std::str::from_utf8(&data)?;
+            ensure!(
+                text.lines()
+                    .any(|line| line.trim_end().starts_with("METHOD:")),
+                "Scheduling requires an iTIP METHOD property"
+            );
+            client
+                .schedule(&outbox, &originator, &recipients, data)
+                .await?
+        }
         CalendarCommands::List => serde_json::to_value(client.calendars().await?)?,
         CalendarCommands::Events {
+            expand,
             calendar,
             after,
             before,
         } => serde_json::to_value(
             client
-                .events(&calendar, after.as_deref(), before.as_deref())
+                .events_expanded(&calendar, after.as_deref(), before.as_deref(), expand)
                 .await?,
         )?,
         CalendarCommands::Get { href } => {
@@ -199,6 +345,36 @@ pub async fn files(command: FilesCommands) -> Result<()> {
     }
     let client = dav_client("https://myfiles.fastmail.com/")?;
     let result = match command {
+        FilesCommands::Move {
+            source,
+            destination,
+            overwrite,
+        } => {
+            client
+                .transfer(
+                    &DavClient::file_path(&source)?,
+                    &DavClient::file_path(&destination)?,
+                    false,
+                    overwrite,
+                )
+                .await?;
+            json!({"source": source, "destination": destination, "moved": true})
+        }
+        FilesCommands::Copy {
+            source,
+            destination,
+            overwrite,
+        } => {
+            client
+                .transfer(
+                    &DavClient::file_path(&source)?,
+                    &DavClient::file_path(&destination)?,
+                    true,
+                    overwrite,
+                )
+                .await?;
+            json!({"source": source, "destination": destination, "copied": true})
+        }
         FilesCommands::List { path } => {
             let folder = format!("{}/", path.trim_end_matches('/'));
             let resources = client.list(&DavClient::file_path(&folder)?).await?;
@@ -275,10 +451,61 @@ pub async fn notes(command: NotesCommands) -> Result<()> {
         NotesCommands::List { limit } => client.list_notes(None, limit).await?,
         NotesCommands::Search { query, limit } => client.list_notes(Some(&query), limit).await?,
         NotesCommands::Get { id } => client.get_note(&id).await?,
-        NotesCommands::Create { title, body } => client.create_note(&title, &body).await?,
-        NotesCommands::Update { id, title, body } => {
+        NotesCommands::Create {
+            title,
+            body,
+            html_body,
+            html_file,
+            attachments,
+            attachment_manifests,
+        } => {
+            let html_body = crate::util::resolve_html(html_body, html_file)?;
+            ensure!(
+                body.is_some() || html_body.is_some(),
+                "Provide --body or --html-body/--html-file"
+            );
             client
-                .update_note(&id, title.as_deref(), body.as_deref())
+                .create_rich_note(crate::jmap::NoteEdit {
+                    title: Some(title),
+                    body,
+                    html_body,
+                    attachments: Some(crate::util::load_attachments(
+                        &attachments,
+                        &attachment_manifests,
+                    )?),
+                })
+                .await?
+        }
+        NotesCommands::Update {
+            id,
+            title,
+            body,
+            html_body,
+            html_file,
+            attachments,
+            attachment_manifests,
+            clear_attachments,
+        } => {
+            let replacing =
+                clear_attachments || !attachments.is_empty() || !attachment_manifests.is_empty();
+            let attachments = if replacing {
+                Some(crate::util::load_attachments(
+                    &attachments,
+                    &attachment_manifests,
+                )?)
+            } else {
+                None
+            };
+            client
+                .update_rich_note(
+                    &id,
+                    crate::jmap::NoteEdit {
+                        title,
+                        body,
+                        html_body: crate::util::resolve_html(html_body, html_file)?,
+                        attachments,
+                    },
+                )
                 .await?
         }
         NotesCommands::Delete { id, .. } => {

@@ -1,5 +1,8 @@
+mod contacts;
 mod events;
+mod management;
 mod notes;
+mod operations;
 mod watch;
 
 use crate::commands::SearchFilter;
@@ -13,6 +16,29 @@ use std::time::Duration;
 use tracing::{debug, instrument};
 
 pub use events::{EventParser, ServerEvent};
+pub use notes::NoteEdit;
+pub use operations::DataType;
+
+tokio::task_local! { static ACCOUNT_OVERRIDE: Option<String>; }
+
+pub async fn with_account<T>(
+    account: Option<String>,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    ACCOUNT_OVERRIDE.scope(account, future).await
+}
+
+pub fn default_account() -> Option<String> {
+    ACCOUNT_OVERRIDE
+        .try_with(Clone::clone)
+        .ok()
+        .flatten()
+        .or_else(|| {
+            std::env::var("FASTMAIL_ACCOUNT_ID")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+}
 pub use watch::{ArrivalWatcher, Arrivals, SharedJmapClient};
 
 const SESSION_URL: &str = "https://api.fastmail.com/jmap/session";
@@ -75,6 +101,8 @@ const DESIRED_CAPABILITIES: &[&str] = &[
     "urn:ietf:params:jmap:core",
     "urn:ietf:params:jmap:mail",
     "urn:ietf:params:jmap:submission",
+    "urn:ietf:params:jmap:vacationresponse",
+    "urn:ietf:params:jmap:contacts",
     "https://www.fastmail.com/dev/maskedemail",
 ];
 
@@ -85,13 +113,12 @@ pub struct JmapClient {
     session: Option<Session>,
     available_capabilities: Vec<String>,
     cached_mailboxes: Option<Vec<Mailbox>>,
+    selected_account: Option<String>,
 }
 
 /// Create an authenticated JMAP client from config
 pub async fn authenticated_client() -> crate::error::Result<JmapClient> {
-    let config = crate::config::Config::load()?;
-    let token = config.get_token()?;
-    let mut client = JmapClient::new(token);
+    let mut client = JmapClient::from_local_config().await?;
     client.authenticate().await?;
     Ok(client)
 }
@@ -620,6 +647,18 @@ fn dedup_by_email(addrs: &mut Vec<EmailAddress>) {
 }
 
 impl JmapClient {
+    pub async fn from_local_config() -> Result<Self> {
+        let config = crate::config::Config::load()?;
+        Ok(Self::new(config.get_token()?))
+    }
+
+    async fn send_authenticated(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response> {
+        Ok(request.bearer_auth(&self.token).send().await?)
+    }
+
     pub fn new(token: String) -> Self {
         let client = Client::builder()
             .timeout(TIMEOUT)
@@ -633,6 +672,7 @@ impl JmapClient {
             session: None,
             available_capabilities: Vec::new(),
             cached_mailboxes: None,
+            selected_account: default_account(),
         }
     }
 
@@ -643,12 +683,21 @@ impl JmapClient {
     #[cfg(test)]
     pub fn with_test_session(api_url: &str) -> Self {
         let mut client = Self::new("test-token".into());
+        client.selected_account = None;
         client.session_url = format!("{api_url}/session");
         client.available_capabilities =
             DESIRED_CAPABILITIES.iter().map(|s| s.to_string()).collect();
         client.session = Some(Session {
             capabilities: DESIRED_CAPABILITIES
                 .iter()
+                // This fixture represents a mail-only account. Contacts/vacation
+                // tests advertise their own capability-specific primary accounts.
+                .filter(|c| {
+                    !matches!(
+                        **c,
+                        "urn:ietf:params:jmap:contacts" | "urn:ietf:params:jmap:vacationresponse"
+                    )
+                })
                 .map(|c| (c.to_string(), json!({})))
                 .collect(),
             accounts: HashMap::new(),
@@ -670,10 +719,7 @@ impl JmapClient {
     pub async fn authenticate(&mut self) -> Result<&Session> {
         debug!("Fetching JMAP session");
         let resp = self
-            .client
-            .get(&self.session_url)
-            .bearer_auth(&self.token)
-            .send()
+            .send_authenticated(self.client.get(&self.session_url))
             .await?;
 
         match resp.status().as_u16() {
@@ -699,9 +745,7 @@ impl JmapClient {
     }
 
     fn account_id(&self) -> Result<&str> {
-        self.session()?
-            .primary_account_id()
-            .ok_or_else(|| Error::Config("No primary account".into()))
+        self.account_for("urn:ietf:params:jmap:mail")
     }
 
     fn require_capability(&self, capability: &str, action: &str) -> Result<()> {
@@ -727,11 +771,7 @@ impl JmapClient {
 
         debug!(url = %session.api_url, "Making JMAP request");
         let resp = self
-            .client
-            .post(&session.api_url)
-            .bearer_auth(&self.token)
-            .json(&req)
-            .send()
+            .send_authenticated(self.client.post(&session.api_url).json(&req))
             .await?;
 
         match resp.status().as_u16() {
@@ -1120,16 +1160,13 @@ impl JmapClient {
             .read_timeout(Duration::from_secs(u64::from(ping) * 3))
             .build()?;
 
-        let mut req = client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .header("Accept", "text/event-stream");
+        let mut req = client.get(&url).header("Accept", "text/event-stream");
         if let Some(id) = last_event_id {
             req = req.header("Last-Event-ID", id);
         }
 
         debug!(url = %url, "Opening JMAP event source");
-        let resp = req.send().await?;
+        let resp = self.send_authenticated(req).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1510,12 +1547,7 @@ impl JmapClient {
         );
 
         debug!(url = %url, "Downloading blob");
-        let resp = self
-            .client
-            .get(&url)
-            .bearer_auth(&self.token)
-            .send()
-            .await?;
+        let resp = self.send_authenticated(self.client.get(&url)).await?;
 
         match resp.status().as_u16() {
             401 => return Err(Error::InvalidToken("Token expired or invalid")),
@@ -1557,18 +1589,27 @@ impl JmapClient {
     #[instrument(skip(self, data))]
     pub async fn upload_blob(&self, data: Vec<u8>, content_type: &str) -> Result<String> {
         let account_id = self.account_id()?;
+        self.upload_blob_to(account_id, data, content_type).await
+    }
+
+    pub async fn upload_blob_to(
+        &self,
+        account_id: &str,
+        data: Vec<u8>,
+        content_type: &str,
+    ) -> Result<String> {
         let session = self.session()?;
 
         let url = apply_url_template(&session.upload_url, &[("accountId", account_id)]);
 
         debug!(url = %url, content_type = %content_type, size = data.len(), "Uploading blob");
         let resp = self
-            .client
-            .post(&url)
-            .bearer_auth(&self.token)
-            .header("Content-Type", content_type)
-            .body(data)
-            .send()
+            .send_authenticated(
+                self.client
+                    .post(&url)
+                    .header("Content-Type", content_type)
+                    .body(data),
+            )
             .await?;
 
         match resp.status().as_u16() {

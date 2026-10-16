@@ -336,6 +336,41 @@ fn is_windows_reserved_stem(name: &str) -> bool {
 }
 
 /// Load a file from disk as an attachment, inferring MIME type from extension.
+/// Load files and reusable upload manifests (single objects or arrays). Accepts
+/// the CLI's output envelope directly, so upload output can be saved as-is.
+pub fn load_attachments(
+    paths: &[String],
+    manifests: &[String],
+) -> anyhow::Result<Vec<AttachmentData>> {
+    let mut attachments = paths
+        .iter()
+        .map(|p| load_attachment(p))
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    for path in manifests {
+        let value: serde_json::Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let value = value.get("data").unwrap_or(&value);
+        let entries = match value.as_array() {
+            Some(entries) => entries.clone(),
+            None => vec![value.clone()],
+        };
+        for entry in entries {
+            let string = |key: &str| -> anyhow::Result<String> {
+                entry[key]
+                    .as_str()
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_owned)
+                    .ok_or_else(|| anyhow::anyhow!("Attachment manifest requires {key}"))
+            };
+            attachments.push(AttachmentData {
+                filename: string("name")?,
+                content_type: string("contentType")?,
+                content: crate::jmap::AttachmentContent::Blob(string("blobId")?),
+            });
+        }
+    }
+    Ok(attachments)
+}
+
 pub fn load_attachment(path: &str) -> anyhow::Result<AttachmentData> {
     let p = Path::new(path);
     let filename = p
@@ -372,6 +407,27 @@ pub fn resolve_html(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reusable_attachment_manifests_accept_upload_envelopes_and_reject_missing_blobs() {
+        let directory = tempfile::tempdir().unwrap();
+        let file = directory.path().join("upload.json");
+        std::fs::write(&file, r#"{"success":true,"data":{"name":"image.png","contentType":"image/png","blobId":"blob1","size":3}}"#).unwrap();
+        let attachments = load_attachments(&[], &[file.to_string_lossy().into_owned()]).unwrap();
+        assert_eq!(attachments.len(), 1);
+        assert_eq!(attachments[0].filename, "image.png");
+        assert!(
+            matches!(&attachments[0].content, crate::jmap::AttachmentContent::Blob(id) if id == "blob1")
+        );
+        std::fs::write(&file, r#"[{"name":"image.png","contentType":"image/png"}]"#).unwrap();
+        assert!(
+            load_attachments(&[], &[file.to_string_lossy().into_owned()])
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("blobId")
+        );
+    }
     use std::io::Write;
 
     #[test]

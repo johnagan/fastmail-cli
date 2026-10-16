@@ -5,8 +5,11 @@
 
 use async_graphql::Schema;
 
+mod api;
 mod attachments;
 pub mod connection;
+#[cfg(test)]
+mod extended_tests;
 pub mod filter;
 pub mod loaders;
 mod mutation;
@@ -27,11 +30,11 @@ pub type FastmailSchema = Schema<QueryRoot, MutationRoot, SubscriptionRoot>;
 /// for the same Fastmail token rather than re-authenticating every call.
 pub type SharedClient = crate::jmap::SharedJmapClient;
 
-/// The credentials `contacts` needs.
+/// Optional credentials for the CardDAV contacts fallback.
 ///
 /// CardDAV authenticates with a username and an app password and rejects API
-/// tokens, so neither half comes from the JMAP credential — contacts can be
-/// unreachable on an otherwise perfectly good connection.
+/// tokens, so neither half comes from the JMAP credential. JMAP contacts use
+/// the request's API token when that capability is advertised.
 ///
 /// Injected as request data rather than read inside a resolver so that
 /// `Session.carddavConfigured` and the `contacts` query answer from the same
@@ -43,6 +46,9 @@ pub struct CardDavCreds {
     pub username: Option<String>,
     pub app_password: Option<String>,
 }
+
+#[derive(Clone, Debug, Default)]
+pub struct DavCreds(pub CardDavCreds);
 
 impl CardDavCreds {
     /// Read from `~/.config/fastmail-cli/config.toml` and the environment.
@@ -107,6 +113,7 @@ pub fn request(query: &str, client: SharedClient, carddav: CardDavCreds) -> asyn
     let loaders = loaders::Loaders::new(client.clone());
     async_graphql::Request::new(query)
         .data(client)
+        .data(DavCreds(carddav.clone()))
         .data(carddav)
         .data(loaders.email)
         .data(loaders.mailbox)

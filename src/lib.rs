@@ -7,9 +7,11 @@
 pub mod carddav;
 pub mod commands;
 pub mod config;
+pub mod contacts;
 pub mod dav;
 pub mod error;
 pub mod jmap;
 pub mod mcp;
 pub mod models;
+pub mod sync;
 pub mod util;

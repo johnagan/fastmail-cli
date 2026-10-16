@@ -14,14 +14,54 @@ pub async fn create_masked_email(
     for_domain: Option<&str>,
     description: Option<&str>,
     prefix: Option<&str>,
+    url: Option<&str>,
+    pending: bool,
 ) -> anyhow::Result<()> {
     let client = authenticated_client().await?;
 
-    let masked_email = client
-        .create_masked_email(for_domain, description, prefix)
-        .await?;
+    let mut properties = serde_json::json!({"state": if pending { "pending" } else { "enabled" }});
+    for (key, value) in [
+        ("forDomain", for_domain),
+        ("description", description),
+        ("emailPrefix", prefix),
+        ("url", url),
+    ] {
+        if let Some(value) = value {
+            properties[key] = serde_json::json!(value);
+        }
+    }
+    let masked_email = client.create_masked_email_options(properties).await?;
 
     Output::success(masked_email).print();
+    Ok(())
+}
+
+pub async fn edit_masked_email(
+    id: &str,
+    domain: Option<&str>,
+    description: Option<&str>,
+    url: Option<&str>,
+    clear_url: bool,
+) -> anyhow::Result<()> {
+    let mut properties = serde_json::json!({});
+    for (key, value) in [
+        ("forDomain", domain),
+        ("description", description),
+        ("url", url),
+    ] {
+        if let Some(value) = value {
+            properties[key] = serde_json::json!(value);
+        }
+    }
+    if clear_url {
+        properties["url"] = serde_json::Value::Null;
+    }
+    anyhow::ensure!(
+        !properties.as_object().unwrap().is_empty(),
+        "Provide at least one metadata change"
+    );
+    let client = authenticated_client().await?;
+    Output::success(client.update_masked_email_options(id, properties).await?).print();
     Ok(())
 }
 

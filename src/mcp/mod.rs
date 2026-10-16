@@ -32,6 +32,7 @@ use graphql::{CardDavCreds, FastmailSchema, SharedClient};
 /// this before proxying the request. Over stdio it is absent and the config
 /// token is used instead.
 pub const TOKEN_HEADER: &str = "x-fastmail-token";
+pub const ACCOUNT_HEADER: &str = "x-fastmail-account";
 
 /// Headers carrying the per-request CardDAV credentials, set by the same
 /// trusted upstream as [`TOKEN_HEADER`].
@@ -42,29 +43,30 @@ pub const TOKEN_HEADER: &str = "x-fastmail-token";
 pub const USERNAME_HEADER: &str = "x-fastmail-username";
 pub const APP_PASSWORD_HEADER: &str = "x-fastmail-app-password";
 
-/// Cache of authenticated JMAP clients keyed by Fastmail token, so we don't
+/// Cache of authenticated JMAP clients keyed by Fastmail token and account, so we don't
 /// re-run the JMAP session handshake on every tool call. Shared across sessions.
-type ClientCache = Arc<Mutex<HashMap<String, SharedClient>>>;
+type ClientCache = Arc<Mutex<HashMap<(String, Option<String>), SharedClient>>>;
 
 /// Get or lazily create an authenticated JMAP client for `token`, caching it
 /// for reuse. The JMAP session handshake runs once per distinct token.
-async fn client_for(cache: &ClientCache, token: &str) -> anyhow::Result<SharedClient> {
-    if let Some(existing) = cache.lock().await.get(token) {
+async fn client_for(
+    cache: &ClientCache,
+    token: &str,
+    account: Option<String>,
+) -> anyhow::Result<SharedClient> {
+    let key = (token.to_owned(), account.clone());
+    if let Some(existing) = cache.lock().await.get(&key) {
         return Ok(existing.clone());
     }
     // Authenticate outside the cache lock so concurrent callers for other
     // tokens aren't blocked on this network round-trip.
     let mut client = JmapClient::new(token.to_string());
     client.authenticate().await?;
+    client.select_account(account)?;
     let shared: SharedClient = Arc::new(Mutex::new(client));
 
     // Re-check under lock: another caller may have inserted meanwhile.
-    Ok(cache
-        .lock()
-        .await
-        .entry(token.to_string())
-        .or_insert(shared)
-        .clone())
+    Ok(cache.lock().await.entry(key).or_insert(shared).clone())
 }
 
 /// Prefer the per-request `X-Fastmail-Token` header (HTTP), else fall back to
@@ -141,17 +143,32 @@ pub struct FastmailMcp {
     /// Exactly `default_token`'s counterpart: your own config over stdio,
     /// nothing in a hosted deployment.
     default_carddav: CardDavCreds,
+    default_dav: CardDavCreds,
+    default_account: Option<String>,
     #[allow(dead_code)] // referenced by #[tool_handler] macro expansion
     tool_router: ToolRouter<Self>,
 }
 
 impl FastmailMcp {
     fn build(default_token: Option<String>) -> Self {
+        let config = Config::load().unwrap_or_default();
+        let default_dav = CardDavCreds {
+            username: std::env::var("FASTMAIL_USERNAME")
+                .ok()
+                .or_else(|| config.dav.username.clone())
+                .or_else(|| config.contacts.username.clone()),
+            app_password: std::env::var("FASTMAIL_APP_PASSWORD")
+                .ok()
+                .or_else(|| config.dav.app_password.clone())
+                .or_else(|| config.contacts.app_password.clone()),
+        };
         Self {
             schema: Arc::new(graphql::build_schema()),
             clients: Arc::new(Mutex::new(HashMap::new())),
             default_token,
             default_carddav: CardDavCreds::from_local_config(),
+            default_dav,
+            default_account: crate::jmap::default_account(),
             tool_router: Self::tool_router(),
         }
     }
@@ -289,9 +306,12 @@ as it arrives) for callers on the HTTP surface, which serves it over SSE at
 `/graphql/stream`; `fastmail watch` is the same thing as a CLI.
 
 NOT LISTED ABOVE — ask `schema_sdl` for these rather than guessing: attachment
-payloads (base64/image/text), masked email, contacts and contact CRUD (CardDAV,
-so check `session { carddavConfigured }` first), identities, moveEmail,
-markAsRead, markAsSpam, and the remaining filter and sort options."
+payloads (base64/image/text), masked email metadata, native JSContact cards/address books
+(JMAP preferred, CardDAV CRUD fallback), rich notes, calendar/file operations, identity editing,
+bulk mail/memberships/deletion, submissions/cancellation, full changes/queryChanges,
+raw export/parse/copy, push subscriptions, mailbox management, vacationResponse, importEmail,
+searchSnippets, starEmail, moveEmail, markAsRead, markAsSpam, and the remaining filter and sort options.
+Management results have typed selection fields; arbitrary native properties/inputs use JSON."
     )]
     async fn graphql(
         &self,
@@ -304,12 +324,16 @@ markAsRead, markAsSpam, and the remaining filter and sort options."
                  (stdio) or send the X-Fastmail-Token header (HTTP).",
             );
         };
-        let client = match client_for(&self.clients, &token).await {
+        let account = header_value(Self::headers(&ctx), ACCOUNT_HEADER)
+            .or_else(|| self.default_account.clone());
+        let client = match client_for(&self.clients, &token, account).await {
             Ok(client) => client,
             Err(e) => return Self::error_result(format!("Fastmail authentication failed: {e}")),
         };
 
-        let mut request = graphql::request(&req.query, client, self.resolve_carddav(&ctx));
+        let mut request = graphql::request(&req.query, client, self.resolve_carddav(&ctx)).data(
+            graphql::DavCreds(resolve_carddav(Self::headers(&ctx), &self.default_dav)),
+        );
 
         if let Some(ref vars) = req.variables {
             match serde_json::from_str::<serde_json::Value>(vars) {
@@ -356,10 +380,10 @@ impl ServerHandler for FastmailMcp {
                 schema fetch at all. `schema_sdl` has the rest, and takes a \
                 `types` list so you can read one corner of it rather than all \
                 ~27KB. Variables go as a JSON string.\n\n\
-                Contacts are the one thing to check before planning around: they \
-                go over CardDAV, which the API token does not cover, and \
-                `{ session { status carddavConfigured } }` answers it without \
-                failing a query first.\n\n\
+                Contacts prefer JMAP when session capabilities include \
+                urn:ietf:params:jmap:contacts; otherwise they use CardDAV. \
+                `{ session { status capabilities carddavConfigured } }` shows \
+                the available capability and fallback credentials.\n\n\
                 ## Querying well\n\
                 - The graph is fully nested and everything below a list is \
                   batched, so ask for what you need in ONE query rather than \
@@ -474,7 +498,9 @@ async fn build_http_request(
         // Authenticated on first use rather than at startup, so a missing or
         // expired token surfaces in the response pane instead of stopping the
         // server booting.
-        let client = client_for(&mcp.clients, &token)
+        let account =
+            header_value(Some(headers), ACCOUNT_HEADER).or_else(|| mcp.default_account.clone());
+        let client = client_for(&mcp.clients, &token, account)
             .await
             .map_err(|e| format!("Fastmail authentication failed: {e}"))?;
         graphql::request(
@@ -482,6 +508,10 @@ async fn build_http_request(
             client,
             resolve_carddav(Some(headers), &mcp.default_carddav),
         )
+        .data(graphql::DavCreds(resolve_carddav(
+            Some(headers),
+            &mcp.default_dav,
+        )))
     };
     if let Some(vars) = req.variables {
         request = request.variables(async_graphql::Variables::from_json(vars));
@@ -854,10 +884,10 @@ mod tests {
         // resolver's JMAP call fails fast instead of reaching the real
         // Fastmail API with a fake token.
         let client = JmapClient::with_test_session("http://127.0.0.1:1");
-        mcp.clients
-            .lock()
-            .await
-            .insert("fake-token".to_string(), Arc::new(Mutex::new(client)));
+        mcp.clients.lock().await.insert(
+            ("fake-token".to_string(), None),
+            Arc::new(Mutex::new(client)),
+        );
 
         let req = HttpGraphqlRequest {
             query: "{ session { status } }".to_string(),
@@ -877,5 +907,36 @@ mod tests {
             !body.contains("No Fastmail token available"),
             "expected the default token to be used, got: {body}"
         );
+    }
+
+    #[tokio::test]
+    async fn client_cache_isolates_accounts_for_the_same_token() {
+        let cache: ClientCache = Arc::new(Mutex::new(HashMap::new()));
+        let a = Arc::new(Mutex::new(JmapClient::with_test_session(
+            "http://127.0.0.1:1",
+        )));
+        let b = Arc::new(Mutex::new(JmapClient::with_test_session(
+            "http://127.0.0.1:2",
+        )));
+        cache
+            .lock()
+            .await
+            .insert(("same-token".into(), Some("a".into())), a.clone());
+        cache
+            .lock()
+            .await
+            .insert(("same-token".into(), Some("b".into())), b.clone());
+        assert!(Arc::ptr_eq(
+            &client_for(&cache, "same-token", Some("a".into()))
+                .await
+                .unwrap(),
+            &a
+        ));
+        assert!(Arc::ptr_eq(
+            &client_for(&cache, "same-token", Some("b".into()))
+                .await
+                .unwrap(),
+            &b
+        ));
     }
 }

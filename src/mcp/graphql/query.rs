@@ -2,6 +2,7 @@
 
 use async_graphql::{Context, Object, Result};
 
+use super::api::*;
 use super::connection::{
     EmailConnection, ListConnection, PageArgs, emails_connection, page_complexity, paginate,
 };
@@ -15,6 +16,294 @@ pub struct QueryRoot;
 #[Object]
 #[allow(clippy::too_many_arguments)]
 impl QueryRoot {
+    async fn query_records(
+        &self,
+        ctx: &Context<'_>,
+        kind: crate::jmap::DataType,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<QueryResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.query_records(kind, arguments.0, false).await?.into())
+    }
+    async fn active_account(
+        &self,
+        ctx: &Context<'_>,
+        kind: crate::jmap::DataType,
+    ) -> Result<String> {
+        Ok(ctx
+            .data::<SharedClient>()?
+            .lock()
+            .await
+            .account_for(kind.capability())?
+            .into())
+    }
+    /// Native records, including submission delivery status, or synchronization state with ids: [].
+    async fn records(
+        &self,
+        ctx: &Context<'_>,
+        kind: crate::jmap::DataType,
+        ids: Option<Vec<String>>,
+    ) -> Result<RecordPage> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.records(kind, ids.as_deref()).await?.into())
+    }
+
+    /// Full created/updated/destroyed changes for any supported data type.
+    async fn changes(
+        &self,
+        ctx: &Context<'_>,
+        kind: crate::jmap::DataType,
+        since_state: String,
+        max_changes: Option<u32>,
+    ) -> Result<ChangeResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client
+            .changes(kind, &since_state, max_changes)
+            .await?
+            .into())
+    }
+
+    async fn query_changes(
+        &self,
+        ctx: &Context<'_>,
+        kind: crate::jmap::DataType,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<QueryResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.query_records(kind, arguments.0, true).await?.into())
+    }
+
+    async fn submissions(
+        &self,
+        ctx: &Context<'_>,
+        arguments: Option<async_graphql::Json<serde_json::Value>>,
+    ) -> Result<QueryResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client
+            .query_records(
+                crate::jmap::DataType::Submission,
+                arguments
+                    .map(|v| v.0)
+                    .unwrap_or(serde_json::json!({"limit": 50})),
+                false,
+            )
+            .await?
+            .into())
+    }
+
+    async fn push_subscriptions(&self, ctx: &Context<'_>) -> Result<RecordPage> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.push_subscriptions().await?.into())
+    }
+
+    /// Download a complete RFC 5322 message as base64.
+    async fn raw_email(&self, ctx: &Context<'_>, id: String) -> Result<BlobDownload> {
+        use base64::Engine;
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        let bytes = client.export_email(&id).await?;
+        Ok(BlobDownload {
+            size: bytes.len() as u64,
+            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            etag: None,
+        })
+    }
+
+    async fn calendars(&self, ctx: &Context<'_>) -> Result<Vec<crate::dav::DavResource>> {
+        Ok(dav(ctx, false)?.calendars().await?)
+    }
+
+    async fn calendar_events(
+        &self,
+        ctx: &Context<'_>,
+        calendar: String,
+        after: Option<String>,
+        before: Option<String>,
+        #[graphql(default = false)] expand: bool,
+    ) -> Result<Vec<crate::dav::DavResource>> {
+        Ok(dav(ctx, false)?
+            .events_expanded(&calendar, after.as_deref(), before.as_deref(), expand)
+            .await?)
+    }
+
+    async fn calendar_event(&self, ctx: &Context<'_>, href: String) -> Result<CalendarData> {
+        let (bytes, etag) = dav(ctx, false)?.get(&href).await?;
+        Ok(CalendarData {
+            href,
+            etag,
+            calendar_data: String::from_utf8(bytes)?,
+        })
+    }
+
+    async fn calendar_free_busy(
+        &self,
+        ctx: &Context<'_>,
+        calendar: String,
+        after: String,
+        before: String,
+    ) -> Result<String> {
+        Ok(dav(ctx, false)?
+            .free_busy(&calendar, &after, &before)
+            .await?)
+    }
+
+    async fn calendar_scheduling(&self, ctx: &Context<'_>) -> Result<SchedulingEndpoints> {
+        Ok(dav(ctx, false)?.scheduling().await?.into())
+    }
+
+    async fn files(
+        &self,
+        ctx: &Context<'_>,
+        #[graphql(default = "/")] path: String,
+    ) -> Result<Vec<FileEntry>> {
+        let resources = dav(ctx, true)?
+            .list(&crate::dav::DavClient::file_path(&format!(
+                "{}/",
+                path.trim_end_matches('/')
+            ))?)
+            .await?;
+        resources
+            .into_iter()
+            .map(|r| {
+                let url = reqwest::Url::parse("https://myfiles.fastmail.com/")?.join(&r.href)?;
+                Ok(FileEntry {
+                    path: percent_encoding::percent_decode_str(url.path())
+                        .decode_utf8()?
+                        .into_owned(),
+                    href: r.href,
+                    name: r.name,
+                    collection: r.collection,
+                    content_type: r.content_type,
+                    size: r.size,
+                    etag: r.etag,
+                })
+            })
+            .collect()
+    }
+
+    async fn file_download(&self, ctx: &Context<'_>, path: String) -> Result<BlobDownload> {
+        use base64::Engine;
+        let (bytes, etag) = dav(ctx, true)?
+            .get(&crate::dav::DavClient::file_path(&path)?)
+            .await?;
+        Ok(BlobDownload {
+            size: bytes.len() as u64,
+            base64: base64::engine::general_purpose::STANDARD.encode(bytes),
+            etag,
+        })
+    }
+    /// Native AddressBook/get response, including state. Use ids: [] for state only.
+    async fn address_book_records(
+        &self,
+        ctx: &Context<'_>,
+        ids: Option<Vec<String>>,
+    ) -> Result<RecordPage> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.contacts_get(true, ids).await?.into())
+    }
+    /// Full native JSContact Cards, preserving groups, photos, addresses, and anniversaries.
+    /// Empty ids returns only the synchronization state; omit ids to fetch all.
+    async fn contact_cards(
+        &self,
+        ctx: &Context<'_>,
+        ids: Option<Vec<String>>,
+    ) -> Result<RecordPage> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.contacts_get(false, ids).await?.into())
+    }
+
+    /// Native ContactCard/query arguments, including filter, sort, pagination, and totals.
+    async fn query_contact_cards(
+        &self,
+        ctx: &Context<'_>,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<QueryResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.contacts_query(arguments.0).await?.into())
+    }
+
+    /// One synchronization page; repeat with newState while hasMoreChanges is true.
+    async fn contact_changes(
+        &self,
+        ctx: &Context<'_>,
+        since_state: String,
+        max_changes: Option<u32>,
+        #[graphql(default = false)] address_books: bool,
+    ) -> Result<ChangeResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(ChangeResult::from(
+            client
+                .contacts_changes(address_books, &since_state, max_changes)
+                .await?,
+        ))
+    }
+
+    /// Native queryChanges arguments, including sinceQueryState and the original filter/sort.
+    async fn contact_query_changes(
+        &self,
+        ctx: &Context<'_>,
+        arguments: async_graphql::Json<serde_json::Value>,
+    ) -> Result<QueryResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(QueryResult::from(
+            client.contacts_query_changes(arguments.0).await?,
+        ))
+    }
+
+    async fn notes(
+        &self,
+        ctx: &Context<'_>,
+        text: Option<String>,
+        #[graphql(default = 50)] limit: u32,
+    ) -> Result<NotePage> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(NotePage::from(
+            client.list_notes(text.as_deref(), limit).await?,
+        ))
+    }
+
+    async fn note(&self, ctx: &Context<'_>, id: String) -> Result<Note> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client.get_note(&id).await?.into())
+    }
+    /// Current vacation response settings (JMAP singleton).
+    async fn vacation_response(&self, ctx: &Context<'_>) -> Result<Option<VacationResponse>> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        let value = client.vacation_response().await?;
+        Ok(value
+            .as_array()
+            .and_then(|values| values.first())
+            .cloned()
+            .map(Into::into))
+    }
+
+    /// Query-specific highlighted subject and body excerpts for known email IDs.
+    async fn search_snippets(
+        &self,
+        ctx: &Context<'_>,
+        text: String,
+        email_ids: Vec<String>,
+    ) -> Result<SnippetResult> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(SnippetResult::from(
+            client
+                .search_snippets(serde_json::json!({"text": text}), &email_ids)
+                .await?,
+        ))
+    }
+
+    /// List the JMAP contact address books, including default and access rights.
+    async fn address_books(&self, ctx: &Context<'_>) -> Result<Vec<AddressBook>> {
+        let client = ctx.data::<SharedClient>()?.lock().await;
+        Ok(client
+            .contact_addressbooks()
+            .await?
+            .as_array()
+            .into_iter()
+            .flatten()
+            .cloned()
+            .map(Into::into)
+            .collect())
+    }
     /// Whether the token still authenticates, and the account it reaches.
     ///
     /// Re-runs the JMAP session handshake rather than reporting what it said
@@ -336,9 +625,7 @@ impl QueryRoot {
 
     /// Search contacts by name, email, or organization.
     ///
-    /// Goes over CardDAV, not JMAP, so it needs a username and an app password
-    /// rather than the API token — check `session { carddavConfigured }` before
-    /// relying on it, since that is answerable without failing a query first.
+    /// Uses JMAP when advertised, otherwise CardDAV with request-scoped credentials.
     #[graphql(complexity = "page_complexity(first, last, child_complexity)")]
     async fn contacts(
         &self,
@@ -350,17 +637,13 @@ impl QueryRoot {
         last: Option<i32>,
     ) -> Result<ListConnection<GqlContact>> {
         let creds = ctx.data::<CardDavCreds>()?;
-        let username = creds.username.clone().ok_or_else(|| {
-            async_graphql::Error::new("Username not configured. Set FASTMAIL_USERNAME env var.")
-        })?;
-        let app_password = creds.app_password.clone().ok_or_else(|| {
-            async_graphql::Error::new(
-                "App password not configured. Set FASTMAIL_APP_PASSWORD env var (API tokens don't work for CardDAV).",
-            )
-        })?;
-
-        let client = crate::carddav::CardDavClient::new(username, app_password);
-        let contacts = client.search_contacts(&query).await?;
+        let client = crate::contacts::ContactsClient::for_request(
+            ctx.data::<SharedClient>()?.clone(),
+            creds.username.clone(),
+            creds.app_password.clone(),
+        )
+        .await?;
+        let contacts = client.search(Some(&query)).await?;
         paginate(
             contacts.into_iter().map(GqlContact::from).collect(),
             PageArgs {

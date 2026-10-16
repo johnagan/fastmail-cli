@@ -1,19 +1,13 @@
-use crate::carddav::{CardDavClient, ContactEmail, ContactFields, ContactPhone};
-use crate::config::Config;
+use crate::carddav::{ContactEmail, ContactFields, ContactPhone};
+use crate::contacts::{ContactBackend, ContactsClient};
 use crate::models::Output;
-
-fn make_carddav_client() -> anyhow::Result<CardDavClient> {
-    let config = Config::load()?;
-    let username = config.get_username()?;
-    let app_password = config.get_app_password()?;
-    Ok(CardDavClient::new(username, app_password))
-}
 
 /// Parse comma-separated emails into ContactEmail vec
 fn parse_emails(input: Option<&str>) -> Vec<ContactEmail> {
     input
         .map(|e| {
             e.split(',')
+                .filter(|addr| !addr.trim().is_empty())
                 .map(|addr| ContactEmail {
                     email: addr.trim().to_string(),
                     label: None,
@@ -28,6 +22,7 @@ fn parse_phones(input: Option<&str>) -> Vec<ContactPhone> {
     input
         .map(|p| {
             p.split(',')
+                .filter(|num| !num.trim().is_empty())
                 .map(|num| ContactPhone {
                     number: num.trim().to_string(),
                     label: None,
@@ -38,54 +33,49 @@ fn parse_phones(input: Option<&str>) -> Vec<ContactPhone> {
 }
 
 /// List all contacts from all address books
-pub async fn list_contacts() -> anyhow::Result<()> {
-    let client = make_carddav_client()?;
-
-    let addressbooks = client.list_addressbooks().await?;
-    eprintln!("Found {} address book(s)", addressbooks.len());
-
-    let mut all_contacts = Vec::new();
-    for ab in &addressbooks {
-        eprintln!("Fetching from: {}", ab.name);
-        let contacts = client.list_contacts(&ab.href).await?;
-        all_contacts.extend(contacts);
-    }
-
-    Output::success(all_contacts).print();
+pub async fn list_contacts(backend: ContactBackend) -> anyhow::Result<()> {
+    let client = ContactsClient::local(backend).await?;
+    Output::success(client.search(None).await?).print();
     Ok(())
 }
 
 /// Search contacts by name or email
-pub async fn search_contacts(query: &str) -> anyhow::Result<()> {
-    let client = make_carddav_client()?;
-    let contacts = client.search_contacts(query).await?;
+pub async fn search_contacts(query: &str, backend: ContactBackend) -> anyhow::Result<()> {
+    let client = ContactsClient::local(backend).await?;
+    let contacts = client.search(Some(query)).await?;
 
     Output::success(contacts).print();
     Ok(())
 }
 
 /// Create a new contact
+#[allow(clippy::too_many_arguments)]
 pub async fn create_contact(
+    backend: ContactBackend,
     name: &str,
     email: Option<&str>,
     phone: Option<&str>,
     organization: Option<&str>,
     title: Option<&str>,
     notes: Option<&str>,
+    address_book: Option<&str>,
 ) -> anyhow::Result<()> {
-    let client = make_carddav_client()?;
+    let client = ContactsClient::local(backend).await?;
     let emails = parse_emails(email);
     let phones = parse_phones(phone);
 
     let contact = client
-        .create_contact(&ContactFields {
-            name: Some(name),
-            emails: Some(&emails),
-            phones: Some(&phones),
-            organization,
-            title,
-            notes,
-        })
+        .create_in(
+            &ContactFields {
+                name: Some(name),
+                emails: Some(&emails),
+                phones: Some(&phones),
+                organization,
+                title,
+                notes,
+            },
+            address_book,
+        )
         .await?;
 
     Output::success(contact).print();
@@ -93,7 +83,9 @@ pub async fn create_contact(
 }
 
 /// Update an existing contact
+#[allow(clippy::too_many_arguments)]
 pub async fn update_contact(
+    backend: ContactBackend,
     contact_id: &str,
     name: Option<&str>,
     email: Option<&str>,
@@ -102,23 +94,15 @@ pub async fn update_contact(
     title: Option<&str>,
     notes: Option<&str>,
 ) -> anyhow::Result<()> {
-    let client = make_carddav_client()?;
+    let client = ContactsClient::local(backend).await?;
     let emails = parse_emails(email);
     let phones = parse_phones(phone);
 
-    let emails_ref = if emails.is_empty() {
-        None
-    } else {
-        Some(emails.as_slice())
-    };
-    let phones_ref = if phones.is_empty() {
-        None
-    } else {
-        Some(phones.as_slice())
-    };
+    let emails_ref = email.map(|_| emails.as_slice());
+    let phones_ref = phone.map(|_| phones.as_slice());
 
     let contact = client
-        .update_contact(
+        .update(
             contact_id,
             &ContactFields {
                 name,
@@ -136,9 +120,9 @@ pub async fn update_contact(
 }
 
 /// Delete a contact
-pub async fn delete_contact(contact_id: &str) -> anyhow::Result<()> {
-    let client = make_carddav_client()?;
-    client.delete_contact(contact_id).await?;
+pub async fn delete_contact(contact_id: &str, backend: ContactBackend) -> anyhow::Result<()> {
+    let client = ContactsClient::local(backend).await?;
+    client.delete(contact_id).await?;
     Output::<()>::success_msg(format!("Contact {contact_id} deleted.")).print();
     Ok(())
 }
