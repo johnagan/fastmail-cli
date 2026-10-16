@@ -10,6 +10,9 @@ pub struct Config {
     pub core: CoreConfig,
     #[serde(default)]
     pub contacts: ContactsConfig,
+    /// Shared app-password credentials for CalDAV and WebDAV.
+    #[serde(default)]
+    pub dav: ContactsConfig,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
@@ -20,7 +23,7 @@ pub struct CoreConfig {
 #[derive(Debug, Serialize, Deserialize, Default)]
 pub struct ContactsConfig {
     pub username: Option<String>,
-    /// App password for CardDAV - API tokens don't work for CardDAV
+    /// App password for DAV services; API tokens do not work here.
     pub app_password: Option<String>,
 }
 
@@ -118,6 +121,24 @@ impl Config {
             .app_password
             .clone()
             .ok_or_else(|| Error::Config("App password not set in [contacts] config.".into()))
+    }
+
+    /// DAV credentials prefer the environment, then [dav], then legacy [contacts].
+    pub fn get_dav_credentials(&self) -> Result<(String, String)> {
+        let username = std::env::var("FASTMAIL_USERNAME")
+            .ok()
+            .or_else(|| self.dav.username.clone())
+            .or_else(|| self.contacts.username.clone())
+            .ok_or_else(|| {
+                Error::Config(
+                    "Set FASTMAIL_USERNAME or [dav].username for calendar/files access".into(),
+                )
+            })?;
+        let password = std::env::var("FASTMAIL_APP_PASSWORD").ok()
+            .or_else(|| self.dav.app_password.clone())
+            .or_else(|| self.contacts.app_password.clone())
+            .ok_or_else(|| Error::Config("Set FASTMAIL_APP_PASSWORD or [dav].app_password with Calendar/Files permissions".into()))?;
+        Ok((username, password))
     }
 }
 

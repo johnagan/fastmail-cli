@@ -7,6 +7,7 @@
 pub mod carddav;
 pub mod commands;
 pub mod config;
+pub mod dav;
 pub mod error;
 pub mod jmap;
 pub mod mcp;

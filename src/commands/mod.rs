@@ -11,6 +11,7 @@ mod reply;
 mod search;
 mod send;
 mod spam;
+mod suite;
 mod thread;
 mod watch;
 
@@ -27,5 +28,6 @@ pub use reply::*;
 pub use search::*;
 pub use send::*;
 pub use spam::*;
+pub use suite::*;
 pub use thread::*;
 pub use watch::*;

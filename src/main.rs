@@ -341,6 +341,18 @@ enum Commands {
     #[command(subcommand)]
     Contacts(ContactsCommands),
 
+    /// Manage calendars and iCalendar events via CalDAV
+    #[command(subcommand)]
+    Calendar(commands::CalendarCommands),
+
+    /// Manage Fastmail file storage via WebDAV
+    #[command(subcommand)]
+    Files(commands::FilesCommands),
+
+    /// Manage Fastmail notes via JMAP
+    #[command(subcommand)]
+    Notes(commands::NotesCommands),
+
     /// Run as MCP (Model Context Protocol) server for Claude integration
     Mcp {
         /// Serve MCP over streamable HTTP at /mcp instead of stdio, on this
@@ -785,6 +797,10 @@ async fn main() {
                 commands::delete_contact(&contact_id).await
             }
         },
+
+        Commands::Calendar(cmd) => commands::calendar(cmd).await,
+        Commands::Files(cmd) => commands::files(cmd).await,
+        Commands::Notes(cmd) => commands::notes(cmd).await,
 
         Commands::Mcp {
             http,

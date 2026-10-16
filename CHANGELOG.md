@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- `calendar` commands for CalDAV discovery, event queries, and iCalendar
+  create/update/delete. Updates use ETags to detect concurrent edits.
+- `files` commands for WebDAV browsing, upload/download, folder creation, and
+  deletion. Existing files require `--overwrite` to replace.
+- `notes` commands for JMAP-backed listing, search, reading, plain-text creation
+  and editing, and deletion. Edits retain the note UUID and keywords and return
+  a new message ID after safely saving a replacement.
+- Optional `[dav]` app-password configuration for calendar/file access, with
+  environment-variable overrides and fallback to `[contacts]` credentials.
+
 ## [3.7.1] - 2026-10-13
 
 ### Changed

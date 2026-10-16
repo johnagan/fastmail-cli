@@ -46,7 +46,7 @@ the data path.
 | Attachments: text extraction (56 formats) + image resize   | ✅                                 | —                                |
 | Contacts (create / update / delete / search)               | ✅ (CardDAV)                       | ✅                               |
 | Org directory search                                       | —                                  | ✅                               |
-| Calendar                                                   | —                                  | ✅                               |
+| Calendar                                                   | ✅ (CLI, CalDAV)                   | ✅                               |
 | Notes                                                      | —                                  | ✅                               |
 | Identities / signatures                                    | ✅                                 | ✅                               |
 

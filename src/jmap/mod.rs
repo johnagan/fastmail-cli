@@ -1,4 +1,5 @@
 mod events;
+mod notes;
 mod watch;
 
 use crate::commands::SearchFilter;
