@@ -28,30 +28,42 @@ Every delete needs `--yes`. Anything that changes an existing note, contact, or 
 
 ## Install
 
-You need Rust 1.85 or newer, and the system libraries in [Requirements](#requirements).
+You need Rust 1.85 or newer.
 
-Install straight from GitHub. This puts `fastmail` in `~/.cargo/bin`:
+### Default install (all features)
+
+This installs everything: mail, contacts, calendars, files, notes, and completions. Notes need OpenSSL headers on Linux, so install those first (see [Requirements](#requirements)).
 
 ```sh
 cargo install --git https://github.com/johnagan/fastmail-cli
 ```
 
-To leave out features you don't use, pass the same flags as [Build options](#build-options):
+The binary goes to `~/.cargo/bin/fastmail`. Make sure that directory is on your PATH.
+
+### Lean installs
+
+To leave features out, use the flags below. A lean build drops the features it doesn't include, and any system libraries they need. Lean builds don't include notes.
 
 ```sh
+# Mail, memos, vacation, masked email, and watch only. No system libraries needed.
 cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features
+
+# Adds contacts, calendars, and files. No system libraries needed.
 cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features --features dav
 ```
 
-Or install from a clone:
+### From a clone
 
 ```sh
 git clone https://github.com/johnagan/fastmail-cli
 cd fastmail-cli
-cargo install --path .
+cargo install --path .                                           # all features
+cargo install --path . --no-default-features --features dav      # lean
 ```
 
-To upgrade, run the same command again with `--force`. Check the install with `fastmail doctor`.
+### Upgrading
+
+Run the same install command again with `--force`. Check which features the binary has with `fastmail doctor`. Its `features` field lists what was compiled in.
 
 ## Requirements
 
@@ -69,7 +81,9 @@ macOS needs only the Xcode command-line tools.
 
 ## Build options
 
-Everything is on by default. To keep dependencies lean, turn features off:
+Everything is on by default. See [Install](#install) for the install commands.
+
+To build from a clone without installing:
 
 ```sh
 cargo build --no-default-features                 # mail, memos, vacation, masked, watch; no TLS-for-IMAP, no XML
