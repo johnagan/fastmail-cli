@@ -25,6 +25,33 @@ JMAP is the primary path. CalDAV, CardDAV, WebDAV, and IMAP cover what JMAP does
 
 Every delete needs `--yes`. Anything that changes an existing note, contact, or event shows the change first and writes only when you pass `--apply` (notes) or name the field to change (contacts, calendars).
 
+## Install
+
+You need Rust 1.85 or newer, and the system libraries in [Requirements](#requirements).
+
+Install straight from GitHub. This puts `fastmail` in `~/.cargo/bin`:
+
+```sh
+cargo install --git https://github.com/johnagan/fastmail-cli
+```
+
+To leave out features you don't use, pass the same flags as [Build options](#build-options):
+
+```sh
+cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features
+cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features --features dav
+```
+
+Or install from a clone:
+
+```sh
+git clone https://github.com/johnagan/fastmail-cli
+cd fastmail-cli
+cargo install --path .
+```
+
+To upgrade, run the same command again with `--force`. Check the install with `fastmail doctor`.
+
 ## Requirements
 
 - Rust stable, 1.85 or newer.
