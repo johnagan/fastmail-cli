@@ -191,6 +191,25 @@ enum MailCommand {
         file: PathBuf,
         #[arg(long, value_enum, default_value_t = markdown::Format::Text)]
         format: markdown::Format,
+        /// Attach a file (repeatable)
+        #[arg(long = "attach")]
+        attach: Vec<PathBuf>,
+    },
+    /// Reply to an email as a draft (or send with --send). Keeps the thread
+    Reply {
+        id: String,
+        /// Reply to everyone on the original
+        #[arg(long)]
+        all: bool,
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long, value_enum, default_value_t = markdown::Format::Text)]
+        format: markdown::Format,
+        #[arg(long = "attach")]
+        attach: Vec<PathBuf>,
+        /// Send instead of saving a draft (needs Email submission on the JMAP token)
+        #[arg(long)]
+        send: bool,
     },
     /// Send an email from a file (needs the Email submission scope on the JMAP token)
     Send {
@@ -204,6 +223,9 @@ enum MailCommand {
         file: PathBuf,
         #[arg(long, value_enum, default_value_t = markdown::Format::Text)]
         format: markdown::Format,
+        /// Attach a file (repeatable)
+        #[arg(long = "attach")]
+        attach: Vec<PathBuf>,
     },
 }
 
@@ -347,6 +369,9 @@ enum CalendarsCommand {
         location: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// Show the event that would be created, without creating it
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Update an event by href (from `calendars events`). Only the fields you pass change
     Update {
@@ -361,6 +386,9 @@ enum CalendarsCommand {
         location: Option<String>,
         #[arg(long)]
         description: Option<String>,
+        /// Show the event as it would be written, without changing it
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Delete an event by href (requires --yes)
     Delete {
@@ -597,26 +625,87 @@ async fn mail(http: &reqwest::Client, creds: &Credentials, command: MailCommand)
             jmap.trash(&id).await?;
             Ok(json!({ "id": id, "trashed": true }))
         }
-        MailCommand::Draft { to, cc, subject, file, format } => {
+        MailCommand::Draft { to, cc, subject, file, format, attach } => {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let body = markdown::body(format, &text);
             let cc: Vec<String> = cc.into_iter().filter(|c| !c.is_empty()).collect();
             let from = jmap.identity_email(&creds.username).await?;
-            let id = jmap.create_draft(&from, &to, &cc, &subject, &body.text, body.html.as_deref()).await?;
+            let draft = jmap::Draft {
+                from: from.clone(),
+                to,
+                cc,
+                subject,
+                text: body.text,
+                html: body.html,
+                attachments: load_attachments(&attach)?,
+                in_reply_to: vec![],
+                references: vec![],
+            };
+            let id = jmap.create_draft(&draft).await?;
             Ok(json!({ "id": id, "from": from }))
         }
-        MailCommand::Send { to, cc, subject, file, format } => {
-            let all: Vec<String> = to.iter().chain(cc.iter()).filter(|r| !r.is_empty()).cloned().collect();
+        MailCommand::Send { to, cc, subject, file, format, attach } => {
+            let cc: Vec<String> = cc.into_iter().filter(|c| !c.is_empty()).collect();
+            let all: Vec<String> = to.iter().chain(cc.iter()).cloned().collect();
             allowlist::check(&creds.allowed_recipients, &all)?;
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let body = markdown::body(format, &text);
-            let cc: Vec<String> = cc.into_iter().filter(|c| !c.is_empty()).collect();
             let from = jmap.identity_email(&creds.username).await?;
-            let id = jmap.create_draft(&from, &to, &cc, &subject, &body.text, body.html.as_deref()).await?;
+            let draft = jmap::Draft {
+                from: from.clone(),
+                to,
+                cc,
+                subject,
+                text: body.text,
+                html: body.html,
+                attachments: load_attachments(&attach)?,
+                in_reply_to: vec![],
+                references: vec![],
+            };
+            let id = jmap.create_draft(&draft).await?;
             if let Err(err) = jmap.send_draft(&id, &from).await {
                 bail!("{err:#}. The message was saved as a draft (id {id}) and not sent");
             }
             Ok(json!({ "id": id, "sent": true }))
+        }
+        MailCommand::Reply { id, all, file, format, attach, send } => {
+            let orig = jmap.reply_context(&id).await?;
+            let me = jmap.identity_email(&creds.username).await?;
+            let mut to = if orig["replyTo"].is_null() { addresses(&orig["from"]) } else { addresses(&orig["replyTo"]) };
+            let mut cc = Vec::new();
+            if all {
+                to.extend(addresses(&orig["to"]));
+                cc = addresses(&orig["cc"]);
+            }
+            let mut seen = std::collections::HashSet::new();
+            to.retain(|a| a.to_ascii_lowercase() != me.to_ascii_lowercase() && seen.insert(a.to_ascii_lowercase()));
+            cc.retain(|a| a.to_ascii_lowercase() != me.to_ascii_lowercase() && seen.insert(a.to_ascii_lowercase()));
+            let subject = reply_subject(orig["subject"].as_str().unwrap_or(""));
+            let msg_ids: Vec<String> = strings(&orig["messageId"]);
+            let mut references = strings(&orig["references"]);
+            references.extend(msg_ids.iter().cloned());
+            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+            let body = markdown::body(format, &text);
+            let draft = jmap::Draft {
+                from: me.clone(),
+                to: to.clone(),
+                cc: cc.clone(),
+                subject: subject.clone(),
+                text: body.text,
+                html: body.html,
+                attachments: load_attachments(&attach)?,
+                in_reply_to: msg_ids,
+                references,
+            };
+            let draft_id = jmap.create_draft(&draft).await?;
+            if send {
+                let all_recipients: Vec<String> = to.iter().chain(cc.iter()).cloned().collect();
+                allowlist::check(&creds.allowed_recipients, &all_recipients)?;
+                if let Err(err) = jmap.send_draft(&draft_id, &me).await {
+                    bail!("{err:#}. The reply was saved as a draft (id {draft_id}) and not sent");
+                }
+            }
+            Ok(json!({ "id": draft_id, "to": to, "cc": cc, "subject": subject, "sent": send }))
         }
     }
 }
@@ -724,14 +813,12 @@ async fn calendars(http: &reqwest::Client, creds: &Credentials, command: Calenda
     let dav = dav_for(http, creds)?;
     match command {
         CalendarsCommand::List => Ok(json!(dav.calendars().await?)),
-        CalendarsCommand::Create { calendar, title, start, end, location, description } => {
+        CalendarsCommand::Create { calendar, title, start, end, location, description, dry_run } => {
             let href = find_calendar(&dav, &calendar).await?;
-            let event = dav.event_create(&href, &title, &start, &end, location.as_deref(), description.as_deref()).await?;
-            Ok(json!({ "href": event }))
+            dav.event_create(&href, &title, &start, &end, location.as_deref(), description.as_deref(), dry_run).await
         }
-        CalendarsCommand::Update { href, title, start, end, location, description } => {
-            dav.event_update(&href, title.as_deref(), start.as_deref(), end.as_deref(), location.as_deref(), description.as_deref()).await?;
-            Ok(json!({ "href": href, "updated": true }))
+        CalendarsCommand::Update { href, title, start, end, location, description, dry_run } => {
+            dav.event_update(&href, title.as_deref(), start.as_deref(), end.as_deref(), location.as_deref(), description.as_deref(), dry_run).await
         }
         CalendarsCommand::Delete { href, yes } => {
             require_yes(yes, "event")?;
@@ -862,6 +949,65 @@ async fn files(http: &reqwest::Client, creds: &Credentials, command: FilesComman
             std::fs::write(&target, &bytes).with_context(|| format!("writing {}", target.display()))?;
             Ok(json!({ "path": target, "bytes": bytes.len() }))
         }
+    }
+}
+
+/// Email addresses from a JMAP address list.
+fn addresses(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|list| list.iter().filter_map(|a| a["email"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+fn strings(v: &Value) -> Vec<String> {
+    v.as_array()
+        .map(|list| list.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// "Re: " in front of a subject, unless it's already there.
+fn reply_subject(subject: &str) -> String {
+    if subject.to_ascii_lowercase().starts_with("re:") {
+        subject.to_string()
+    } else {
+        format!("Re: {subject}")
+    }
+}
+
+/// Reads files to attach, taking the MIME type from the file name.
+fn load_attachments(paths: &[PathBuf]) -> Result<Vec<jmap::Attachment>> {
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("attachment").to_string();
+            let mime = mime_for(&name).to_string();
+            Ok(jmap::Attachment { name, mime, bytes })
+        })
+        .collect()
+}
+
+fn mime_for(name: &str) -> &'static str {
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+    match ext.as_str() {
+        "pdf" => "application/pdf",
+        "txt" => "text/plain",
+        "md" => "text/markdown",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "heic" => "image/heic",
+        "zip" => "application/zip",
+        "doc" => "application/msword",
+        "docx" => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        _ => "application/octet-stream",
     }
 }
 

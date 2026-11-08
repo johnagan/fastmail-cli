@@ -627,19 +627,28 @@ impl Dav {
         self.delete_item(href).await
     }
 
-    pub async fn event_create(&self, calendar_href: &str, title: &str, start: &str, end: &str, location: Option<&str>, description: Option<&str>) -> Result<String> {
+    /// Creates an event. With `dry_run`, returns the event that would be written and writes nothing.
+    pub async fn event_create(&self, calendar_href: &str, title: &str, start: &str, end: &str, location: Option<&str>, description: Option<&str>, dry_run: bool) -> Result<Value> {
         let uid = new_uid()?;
         let base = if calendar_href.ends_with('/') { calendar_href.to_string() } else { format!("{calendar_href}/") };
         let url = format!("{base}{uid}.ics");
         let body = ics_new(&uid, title, start, end, location, description)?;
+        if dry_run {
+            return Ok(json!({ "dry_run": true, "href": url, "ics": body }));
+        }
         self.put_new(&url, "text/calendar; charset=utf-8", body).await?;
-        Ok(url)
+        Ok(json!({ "href": url }))
     }
 
-    pub async fn event_update(&self, href: &str, title: Option<&str>, start: Option<&str>, end: Option<&str>, location: Option<&str>, description: Option<&str>) -> Result<()> {
+    /// Updates an event. With `dry_run`, returns the event as it would be written and writes nothing.
+    pub async fn event_update(&self, href: &str, title: Option<&str>, start: Option<&str>, end: Option<&str>, location: Option<&str>, description: Option<&str>, dry_run: bool) -> Result<Value> {
         let existing = self.get_text(href).await?;
         let updated = ics_update(&existing, title, start, end, location, description)?;
-        self.put_replace(href, "text/calendar; charset=utf-8", updated).await
+        if dry_run {
+            return Ok(json!({ "dry_run": true, "href": href, "ics": updated }));
+        }
+        self.put_replace(href, "text/calendar; charset=utf-8", updated).await?;
+        Ok(json!({ "href": href, "updated": true }))
     }
 
     pub async fn event_delete(&self, href: &str) -> Result<()> {

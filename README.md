@@ -10,14 +10,15 @@ JMAP is the primary path. CalDAV, CardDAV, WebDAV, and IMAP cover what JMAP does
 |---|---|---|---|
 | Mail: search, read, attachments | `mail search`, `mail get`, `mail attachments` | JMAP | JMAP token (Email) |
 | Mail: flag, read, move, trash | `mail read`, `mail unread`, `mail flag`, `mail unflag`, `mail move`, `mail trash` | JMAP | JMAP token (Email) |
-| Drafts | `mail draft` | JMAP | JMAP token (Email) |
-| Send | `mail send` | JMAP | JMAP token (Email, Email submission) |
+| Drafts | `mail draft`, with `--attach` for files | JMAP | JMAP token (Email) |
+| Replies | `mail reply ID [--all]`, keeps the thread | JMAP | JMAP token (Email) |
+| Send | `mail send`, with `--attach`; `mail reply --send` | JMAP | JMAP token (Email, Email submission) |
 | Memos | `memos list` | JMAP | JMAP token (Email) |
 | Vacation replies | `vacation show`, `vacation set` (with `--on`/`--off`, `--from`, `--to`, `--subject`, `--file`, `--clear`) | JMAP | JMAP token (Vacation response) |
 | Masked email | `masked list`, `masked create`, `masked enable`, `masked disable`, `masked delete --yes` | JMAP | JMAP token (Masked Email) |
 | New mail stream | `watch` | JMAP push | JMAP token (Email) |
 | Contacts | `contacts list`, `contacts create`, `contacts update`, `contacts delete --yes` | CardDAV | DAV app password |
-| Calendars | `calendars list`, `calendars events`, `calendars create`, `calendars update`, `calendars delete --yes` | CalDAV | DAV app password |
+| Calendars | `calendars list`, `calendars events`, `calendars create`, `calendars update`, `calendars delete --yes`. `create` and `update` take `--dry-run` to show the change without writing it | CalDAV | DAV app password |
 | Files | `files ls`, `files get`, `files put`, `files mv`, `files rm --yes` | WebDAV | DAV app password |
 | Notes | `notes list`, `notes get`, `notes create`, `notes put`, `notes delete --yes` | IMAP | IMAP app password |
 | Health check | `doctor` | all | all configured |
@@ -118,6 +119,10 @@ fastmail calendars events CALENDAR --from 2026-01-01 --to 2027-01-01
 
 Run `fastmail --help` or `fastmail <command> --help` for every option.
 
+### Replies
+
+`mail reply ID` creates a draft reply to an email. It sets the reply headers so the draft stays in the original's thread, and the subject gets "Re:" if it doesn't already have it. `--all` replies to everyone on the original. Your own address is left out of the recipients.
+
 ### Email format
 
 Email is plain text by default. `mail draft` and `mail send` accept `--format text`, `markdown`, or `html`. Markdown and HTML also produce a plain-text part, so every client can read the message.
@@ -158,7 +163,7 @@ fastmail completions bash > ~/.local/share/bash-completion/completions/fastmail 
 ## Limitations
 
 - Send needs the Email submission permission on the JMAP token. The send allowlist is opt-in.
-- Drafts and sends don't support attachments yet.
+- Calendar writes have no approval step inside the CLI. Use `--dry-run` to show a change first.
 - Plain-text email shows links as bare URLs. Use `--format html` if you need link text.
 - Masked email delete marks the address deleted, so mail to it bounces, but the record stays in your list. The API can't erase it.
 - Watch reports new mail only, not flag or move changes.

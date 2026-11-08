@@ -9,12 +9,32 @@ const EMAIL_SUMMARY: [&str; 9] = [
     "id", "subject", "from", "to", "receivedAt", "hasAttachment", "preview", "mailboxIds", "keywords",
 ];
 
+/// A message to create as a draft.
+pub struct Draft {
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub subject: String,
+    pub text: String,
+    pub html: Option<String>,
+    pub attachments: Vec<Attachment>,
+    pub in_reply_to: Vec<String>,
+    pub references: Vec<String>,
+}
+
+pub struct Attachment {
+    pub name: String,
+    pub mime: String,
+    pub bytes: Vec<u8>,
+}
+
 pub struct Jmap {
     http: Client,
     token: String,
     api_url: String,
     download_url: String,
     event_url: String,
+    upload_url: String,
     pub account_id: String,
     pub capabilities: Vec<String>,
 }
@@ -32,6 +52,7 @@ impl Jmap {
             api_url: session["apiUrl"].as_str().context("session has no apiUrl")?.to_string(),
             download_url: session["downloadUrl"].as_str().context("session has no downloadUrl")?.to_string(),
             event_url: session["eventSourceUrl"].as_str().context("session has no eventSourceUrl")?.to_string(),
+            upload_url: session["uploadUrl"].as_str().context("session has no uploadUrl")?.to_string(),
             account_id: session["primaryAccounts"]["urn:ietf:params:jmap:mail"]
                 .as_str()
                 .context("session has no primary mail account")?
@@ -228,42 +249,91 @@ impl Jmap {
     }
 
     /// Creates a plain-text draft in Drafts and returns its id.
-    /// Creates a draft in Drafts. `text` is the plain-text part. `html`, when given, is the HTML part.
-    pub async fn create_draft(&self, from: &str, to: &[String], cc: &[String], subject: &str, text: &str, html: Option<&str>) -> Result<String> {
+    /// Uploads bytes and returns the blob id to attach them with.
+    pub async fn upload(&self, bytes: Vec<u8>, mime: &str) -> Result<String> {
+        let url = self.upload_url.replace("{accountId}", &self.account_id);
+        let resp = send(
+            self.http
+                .post(&url)
+                .bearer_auth(&self.token)
+                .header("Content-Type", mime)
+                .body(bytes),
+        )
+        .await?;
+        if !resp.status().is_success() {
+            bail!("upload returned HTTP {}", resp.status());
+        }
+        let v: Value = resp.json().await.context("parsing upload response")?;
+        v["blobId"].as_str().map(str::to_string).context("upload returned no blob id")
+    }
+
+    /// Creates a draft in Drafts. Attachments are uploaded first, then referenced by blob id.
+    pub async fn create_draft(&self, d: &Draft) -> Result<String> {
         let drafts = self.mailbox_id("drafts").await?;
         let addrs = |v: &[String]| v.iter().map(|e| json!({ "email": e })).collect::<Vec<_>>();
-        let (structure, values) = match html {
+        let (body, values) = match &d.html {
             Some(h) => (
                 json!({ "type": "multipart/alternative", "subParts": [
                     { "partId": "text", "type": "text/plain" },
                     { "partId": "html", "type": "text/html" }
                 ] }),
-                json!({ "text": { "value": text }, "html": { "value": h } }),
+                json!({ "text": { "value": d.text }, "html": { "value": h } }),
             ),
             None => (
                 json!({ "partId": "text", "type": "text/plain" }),
-                json!({ "text": { "value": text } }),
+                json!({ "text": { "value": d.text } }),
             ),
         };
+        let mut attachments = Vec::new();
+        for a in &d.attachments {
+            let blob = self.upload(a.bytes.clone(), &a.mime).await?;
+            attachments.push(json!({ "blobId": blob, "type": a.mime, "name": a.name, "disposition": "attachment" }));
+        }
+        let structure = if attachments.is_empty() {
+            body
+        } else {
+            let mut parts = vec![body];
+            parts.extend(attachments);
+            json!({ "type": "multipart/mixed", "subParts": parts })
+        };
+        let mut item = json!({
+            "mailboxIds": { drafts: true },
+            "keywords": { "$draft": true, "$seen": true },
+            "from": [{ "email": d.from }],
+            "to": addrs(&d.to),
+            "cc": addrs(&d.cc),
+            "subject": d.subject,
+            "bodyStructure": structure,
+            "bodyValues": values
+        });
+        if !d.in_reply_to.is_empty() {
+            item["inReplyTo"] = json!(d.in_reply_to);
+        }
+        if !d.references.is_empty() {
+            item["references"] = json!(d.references);
+        }
         let r = self
             .call(vec![json!(["Email/set", {
                 "accountId": self.account_id,
-                "create": { "d": {
-                    "mailboxIds": { drafts: true },
-                    "keywords": { "$draft": true, "$seen": true },
-                    "from": [{ "email": from }],
-                    "to": addrs(to),
-                    "cc": addrs(cc),
-                    "subject": subject,
-                    "bodyStructure": structure,
-                    "bodyValues": values
-                } }
+                "create": { "d": item }
             }, "c"])])
             .await?;
         if let Some(err) = r[0]["notCreated"].get("d") {
             bail!("JMAP refused the draft: {}", err["description"].as_str().or(err["type"].as_str()).unwrap_or("unknown"));
         }
         r[0]["created"]["d"]["id"].as_str().map(str::to_string).context("draft was not created")
+    }
+
+    /// Headers needed to reply to an email: its Message-ID, References, and who it was from.
+    pub async fn reply_context(&self, id: &str) -> Result<Value> {
+        let r = self
+            .call(vec![json!(["Email/get", {
+                "accountId": self.account_id,
+                "ids": [id],
+                "properties": ["messageId", "references", "from", "to", "cc", "replyTo", "subject"]
+            }, "g"])])
+            .await?;
+        r[0]["list"].get(0).cloned().context("no email with that id")
     }
 
     /// Sends an existing draft. Needs the Email submission scope on the token.
