@@ -101,6 +101,17 @@ Notes are markdown by default. `notes get` returns markdown plus `warnings` for 
 
 `notes put` shows a diff of the change. Nothing is written until you add `--apply`. It also refuses changes that would drop embedded images.
 
+### Send allowlist
+
+To limit where `mail send` can deliver, set an allowlist. It's off by default. When it's set, any message with a recipient not on the list is refused before a draft is created. Entries are full addresses, or a domain written as `@example.com`:
+
+```toml
+# ~/.config/fastmail/config.toml
+allowed_recipients = ["me@example.com", "@team.example"]
+```
+
+Or set `FASTMAIL_ALLOWED_RECIPIENTS` to a comma-separated list. Drafts aren't affected.
+
 ### Watching for new mail
 
 `fastmail watch` prints one JSON line per new email until interrupted:
@@ -119,7 +130,7 @@ fastmail completions bash > ~/.local/share/bash-completion/completions/fastmail 
 
 ## Limitations
 
-- Send needs the Email submission permission on the JMAP token.
+- Send needs the Email submission permission on the JMAP token. The send allowlist is opt-in.
 - Drafts and sends don't support attachments yet.
 - Plain-text email shows links as bare URLs. Use `--format html` if you need link text.
 - Masked email delete marks the address deleted, so mail to it bounces, but the record stays in your list. The API can't erase it.

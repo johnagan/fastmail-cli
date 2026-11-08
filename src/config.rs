@@ -11,6 +11,8 @@ struct FileConfig {
     dav: Secret,
     #[serde(default)]
     imap: Secret,
+    #[serde(default)]
+    allowed_recipients: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -24,6 +26,8 @@ pub struct Credentials {
     pub jmap_token: Option<String>,
     pub dav_password: Option<String>,
     pub imap_password: Option<String>,
+    /// Addresses (or `@domain` entries) the CLI may send to. Empty means no restriction.
+    pub allowed_recipients: Vec<String>,
 }
 
 fn state(value: &Option<String>) -> &'static str {
@@ -37,6 +41,7 @@ impl fmt::Debug for Credentials {
             .field("jmap_token", &state(&self.jmap_token))
             .field("dav_password", &state(&self.dav_password))
             .field("imap_password", &state(&self.imap_password))
+            .field("allowed_recipients", &self.allowed_recipients.len())
             .finish()
     }
 }
@@ -87,5 +92,9 @@ pub fn load() -> Result<Credentials> {
         jmap_token: env("FASTMAIL_JMAP_TOKEN").or(file.jmap.token),
         dav_password: env("FASTMAIL_DAV_PASSWORD").or(file.dav.password),
         imap_password: env("FASTMAIL_IMAP_PASSWORD").or(file.imap.password),
+        allowed_recipients: match env("FASTMAIL_ALLOWED_RECIPIENTS") {
+            Some(list) => list.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+            None => file.allowed_recipients,
+        },
     })
 }

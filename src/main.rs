@@ -1,3 +1,4 @@
+mod allowlist;
 mod config;
 #[cfg(feature = "dav")]
 mod dav;
@@ -605,6 +606,8 @@ async fn mail(http: &reqwest::Client, creds: &Credentials, command: MailCommand)
             Ok(json!({ "id": id, "from": from }))
         }
         MailCommand::Send { to, cc, subject, file, format } => {
+            let all: Vec<String> = to.iter().chain(cc.iter()).filter(|r| !r.is_empty()).cloned().collect();
+            allowlist::check(&creds.allowed_recipients, &all)?;
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
             let body = markdown::body(format, &text);
             let cc: Vec<String> = cc.into_iter().filter(|c| !c.is_empty()).collect();
