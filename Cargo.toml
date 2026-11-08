@@ -1,0 +1,32 @@
+[package]
+name = "fastmail"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Command-line access to Fastmail: mail, contacts, calendars, files, notes, and more"
+
+[features]
+default = ["dav", "notes", "completions"]
+# Contacts, calendars, and files over CardDAV, CalDAV, and WebDAV.
+dav = ["dep:quick-xml", "dep:chrono"]
+# Notes over IMAP. Pulls in TLS, which needs OpenSSL headers on Linux.
+notes = ["dep:imap", "dep:native-tls", "dep:chrono"]
+# `fastmail completions <shell>`.
+completions = ["dep:clap_complete"]
+
+[dependencies]
+anyhow = "1.0.104"
+clap = { version = "4.6.7", features = ["derive"] }
+pulldown-cmark = "0.13.6"
+clap_complete = { version = "4.6.11", optional = true }
+chrono = { version = "0.4.45", optional = true }
+imap = { version = "2.4.1", optional = true }
+native-tls = { version = "0.2.18", optional = true }
+quick-xml = { version = "0.42.0", optional = true }
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "rustls"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tokio = { version = "1.54.1", features = ["macros", "rt-multi-thread", "time"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
