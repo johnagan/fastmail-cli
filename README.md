@@ -1,4 +1,4 @@
-# fastmail
+# Fastmail CLI for AI Agents
 
 Command-line access to Fastmail: mail, memos, contacts, calendars, files, notes, vacation replies, masked email, and a live stream of new mail.
 
