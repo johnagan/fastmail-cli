@@ -8,6 +8,10 @@ repository = "https://github.com/johnagan/fastmail-cli"
 keywords = ["fastmail", "email", "cli", "jmap", "caldav"]
 categories = ["command-line-utilities", "email"]
 
+[package.metadata.docs.rs]
+# Binary crate; skip the default features so docs.rs doesn't need OpenSSL.
+no-default-features = true
+
 [features]
 default = ["dav", "notes", "completions"]
 # Contacts, calendars, and files over CardDAV, CalDAV, and WebDAV.

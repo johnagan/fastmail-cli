@@ -35,7 +35,7 @@ You need Rust 1.85 or newer.
 This installs everything: mail, contacts, calendars, files, notes, and completions. Notes need OpenSSL headers on Linux, so install those first (see [Requirements](#requirements)).
 
 ```sh
-cargo install --git https://github.com/johnagan/fastmail-cli
+cargo install fastmail
 ```
 
 The binary goes to `~/.cargo/bin/fastmail`. Make sure that directory is on your PATH.
@@ -46,11 +46,13 @@ To leave features out, use the flags below. A lean build drops the features it d
 
 ```sh
 # Mail, memos, vacation, masked email, and watch only. No system libraries needed.
-cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features
+cargo install fastmail --no-default-features
 
 # Adds contacts, calendars, and files. No system libraries needed.
-cargo install --git https://github.com/johnagan/fastmail-cli --no-default-features --features dav
+cargo install fastmail --no-default-features --features dav
 ```
+
+To install straight from git instead of crates.io, add `--git https://github.com/johnagan/fastmail-cli` to any of these.
 
 ### From a clone
 
