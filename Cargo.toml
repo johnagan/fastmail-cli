@@ -1,6 +1,6 @@
 [package]
 name = "fastmail"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 description = "Command-line access to Fastmail: mail, contacts, calendars, files, notes, and more"
