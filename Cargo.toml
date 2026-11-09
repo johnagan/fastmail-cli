@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 description = "Command-line access to Fastmail: mail, contacts, calendars, files, notes, and more"
+repository = "https://github.com/johnagan/fastmail-cli"
+keywords = ["fastmail", "email", "cli", "jmap", "caldav"]
+categories = ["command-line-utilities", "email"]
 
 [features]
 default = ["dav", "notes", "completions"]
