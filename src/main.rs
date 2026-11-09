@@ -2,6 +2,7 @@ mod allowlist;
 mod config;
 #[cfg(feature = "dav")]
 mod dav;
+mod ddns;
 mod http;
 mod jmap;
 mod markdown;
@@ -49,6 +50,12 @@ enum Command {
     },
     /// Show which features the configured credentials can reach
     Doctor,
+    /// Dynamic DNS for a domain whose DNS is hosted at Fastmail
+    #[command(visible_alias = "ddns")]
+    DynamicDns {
+        #[command(subcommand)]
+        command: DynamicDnsCommand,
+    },
     /// Mail over JMAP
     Mail {
         #[command(subcommand)]
@@ -226,6 +233,21 @@ enum MailCommand {
         /// Attach a file (repeatable)
         #[arg(long = "attach")]
         attach: Vec<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DynamicDnsCommand {
+    /// Point a Dynamic DNS record at this machine's address, or at an address you pass
+    Update {
+        /// The subdomain from the Dynamic DNS entry, for example home.example.com
+        hostname: String,
+        /// IPv4 address, for example 203.0.113.5. Leave out to use this machine's address
+        #[arg(long, conflicts_with = "ipv6")]
+        ip: Option<String>,
+        /// IPv6 address, for example 2001:db8::1. Leave out to use this machine's address
+        #[arg(long)]
+        ipv6: Option<String>,
     },
 }
 
@@ -461,6 +483,7 @@ async fn run(cli: Cli) -> Result<Value> {
     let http = http::client()?;
     match cli.command {
         Command::Doctor => doctor(&http, &creds).await,
+        Command::DynamicDns { command } => dynamic_dns(&http, &creds, command).await,
         Command::Vacation { command } => vacation(&http, &creds, command).await,
         Command::Masked { command } => masked(&http, &creds, command).await,
         Command::Watch => {
@@ -524,6 +547,10 @@ async fn doctor(http: &reqwest::Client, creds: &Credentials) -> Result<Value> {
 
     #[cfg(feature = "notes")]
     check_imap(creds, &mut report).await?;
+
+    report.insert("ddns".into(), json!({
+        "status": if creds.ddns_token.is_some() { "configured" } else { "no token" },
+    }));
 
     let mut features = Vec::new();
     if cfg!(feature = "dav") { features.push("dav"); }
@@ -706,6 +733,24 @@ async fn mail(http: &reqwest::Client, creds: &Credentials, command: MailCommand)
                 }
             }
             Ok(json!({ "id": draft_id, "to": to, "cc": cc, "subject": subject, "sent": send }))
+        }
+    }
+}
+
+async fn dynamic_dns(http: &reqwest::Client, creds: &Credentials, command: DynamicDnsCommand) -> Result<Value> {
+    let token = creds
+        .ddns_token
+        .as_deref()
+        .context("no Dynamic DNS token: set FASTMAIL_DDNS_TOKEN or ddns.token in the config file")?;
+    match command {
+        DynamicDnsCommand::Update { hostname, ip, ipv6 } => {
+            ddns::update(
+                http,
+                &creds.username,
+                token,
+                ddns::Update { hostname: &hostname, ipv4: ip.as_deref(), ipv6: ipv6.as_deref() },
+            )
+            .await
         }
     }
 }

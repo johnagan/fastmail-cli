@@ -1,6 +1,6 @@
 ---
 name: fastmail
-description: Use the `fastmail` CLI to read and change the account owner's Fastmail mail, memos, contacts, calendars, files, and notes. Covers which command to use, which credentials each feature needs, and the safety rules for writes.
+description: Use the `fastmail` CLI to read and change the account owner's Fastmail mail, memos, contacts, calendars, files, notes, and dynamic DNS records. Covers which command to use, which credentials each feature needs, and the safety rules for writes.
 ---
 
 # fastmail CLI
@@ -9,7 +9,7 @@ description: Use the `fastmail` CLI to read and change the account owner's Fastm
 
 ## Credentials
 
-Set by environment variables (`FASTMAIL_USERNAME`, `FASTMAIL_JMAP_TOKEN`, `FASTMAIL_DAV_PASSWORD`, `FASTMAIL_IMAP_PASSWORD`) or by `~/.config/fastmail/config.toml` (mode 0600). Never print credentials or pass them as arguments. Run `fastmail doctor` first: it reports which services work.
+Set by environment variables (`FASTMAIL_USERNAME`, `FASTMAIL_JMAP_TOKEN`, `FASTMAIL_DAV_PASSWORD`, `FASTMAIL_IMAP_PASSWORD`, `FASTMAIL_DDNS_TOKEN`) or by `~/.config/fastmail/config.toml` (mode 0600). Never print credentials or pass them as arguments. Run `fastmail doctor` first: it reports which services work.
 
 ## Commands
 
@@ -23,6 +23,7 @@ Set by environment variables (`FASTMAIL_USERNAME`, `FASTMAIL_JMAP_TOKEN`, `FASTM
 | Calendars | `calendars list`, `calendars events NAME --from YYYY-MM-DD --to YYYY-MM-DD`, `calendars create NAME --title T --start RFC3339 --end RFC3339 [--location L] [--description D]`, `calendars update HREF ...`, `calendars delete HREF --yes` | DAV password |
 | Files | `files ls [PATH]`, `files get PATH --out FILE`, `files put LOCAL REMOTE [--overwrite]`, `files mv FROM TO`, `files rm PATH --yes` | DAV password |
 | Notes | `notes list`, `notes get UID [--format markdown\|html]`, `notes create --title T --file note.md [--format markdown|html|text]`, `notes put UID --file note.md [--format ...] [--apply]`, `notes delete UID --yes` | IMAP password |
+| Dynamic DNS | `dynamic-dns update HOSTNAME [--ip ADDR] [--ipv6 ADDR]` (alias `ddns`) | Dynamic DNS token, a separate token from the JMAP one |
 
 Notes are markdown by default. `notes get` returns `markdown` plus `warnings` for formatting markdown can't express. `notes put` shows a diff and writes only with `--apply`.
 

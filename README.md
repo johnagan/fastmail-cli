@@ -1,6 +1,6 @@
 # Fastmail CLI for AI Agents
 
-Command-line access to Fastmail: mail, memos, contacts, calendars, files, notes, vacation replies, masked email, and a live stream of new mail.
+Command-line access to Fastmail: mail, memos, contacts, calendars, files, notes, vacation replies, masked email, dynamic DNS, and a live stream of new mail.
 
 JMAP is the primary path. CalDAV, CardDAV, WebDAV, and IMAP cover what JMAP doesn't.
 
@@ -16,6 +16,7 @@ JMAP is the primary path. CalDAV, CardDAV, WebDAV, and IMAP cover what JMAP does
 | Memos | `memos list` | JMAP | JMAP token (Email) |
 | Vacation replies | `vacation show`, `vacation set` (with `--on`/`--off`, `--from`, `--to`, `--subject`, `--file`, `--clear`) | JMAP | JMAP token (Vacation response) |
 | Masked email | `masked list`, `masked create`, `masked enable`, `masked disable`, `masked delete --yes` | JMAP | JMAP token (Masked Email) |
+| Dynamic DNS | `dynamic-dns update HOSTNAME`, also `ddns`. Add `--ip` or `--ipv6` to set an address yourself | DynDNS2 | Dynamic DNS API token |
 | New mail stream | `watch` | JMAP push | JMAP token (Email) |
 | Contacts | `contacts list`, `contacts create`, `contacts update`, `contacts delete --yes` | CardDAV | DAV app password |
 | Calendars | `calendars list`, `calendars events`, `calendars create`, `calendars update`, `calendars delete --yes`. `create` and `update` take `--dry-run` to show the change without writing it | CalDAV | DAV app password |
@@ -110,6 +111,7 @@ Set these as environment variables, or in `~/.config/fastmail/config.toml` (mode
 | `FASTMAIL_JMAP_TOKEN` | `[jmap] token` | Mail, memos, vacation, masked email, watch |
 | `FASTMAIL_DAV_PASSWORD` | `[dav] password` | Contacts, calendars, files |
 | `FASTMAIL_IMAP_PASSWORD` | `[imap] password` | Notes |
+| `FASTMAIL_DDNS_TOKEN` | `[ddns] token` | Dynamic DNS |
 
 Create the JMAP token under Settings → Privacy & Security → API tokens, with only the permissions you need:
 
@@ -120,6 +122,8 @@ Create the JMAP token under Settings → Privacy & Security → API tokens, with
 - Masked Email, for masked addresses
 
 Create the DAV and IMAP passwords under Settings → Privacy & Security → app passwords. The DAV password covers CardDAV, CalDAV, and WebDAV. The IMAP password needs mail access.
+
+Create the Dynamic DNS token under Settings → Privacy & Security → API tokens, with the type set to **Dynamic DNS**. That type only appears if the account has a custom domain. It's a separate token from the JMAP one, and it works only for Dynamic DNS.
 
 The CLI refuses a config file that other users can read.
 
@@ -170,6 +174,30 @@ fastmail watch | jq -r '.subject'
 
 It uses JMAP push (server-sent events) and reconnects with backoff. A dropped connection is caught up on reconnect, so mail that arrives during an outage is still reported. The last-seen state is kept in `~/.config/fastmail/state` (override with `FASTMAIL_STATE`). The first run records the current state and prints nothing. Flag and move changes aren't reported, only new mail.
 
+### Dynamic DNS
+
+`fastmail dynamic-dns update home.example.com` points a Dynamic DNS record at the address the request came from. The record has to exist first: in Settings → Domains, open the domain, choose Customise DNS, and add an entry with the type set to Dynamic DNS and the subdomain you want.
+
+To set an address yourself, pass `--ip` for IPv4 or `--ipv6` for IPv6:
+
+```sh
+fastmail dynamic-dns update home.example.com --ip 203.0.113.5
+```
+
+Leaving both out lets Fastmail use the address it sees. The output says whether the record changed:
+
+```json
+{"ok": true, "data": {"hostname": "home.example.com", "result": "good", "changed": true, "address": "203.0.113.5"}}
+```
+
+`result` is `good` when the record moved, `nochg` when it already pointed there. Both count as success. From cron, run it every five minutes or so:
+
+```cron
+*/5 * * * * /Users/you/.cargo/bin/fastmail dynamic-dns update home.example.com
+```
+
+Credentials come from the environment or the config file, so the cron job needs `FASTMAIL_USERNAME` and `FASTMAIL_DDNS_TOKEN` set.
+
 ### Shell completions
 
 ```sh
@@ -184,7 +212,6 @@ fastmail completions bash > ~/.local/share/bash-completion/completions/fastmail 
 - Masked email delete marks the address deleted, so mail to it bounces, but the record stays in your list. The API can't erase it.
 - Watch reports new mail only, not flag or move changes.
 - Notes can't be edited through the CLI if they contain images added from Apple devices. The CLI refuses changes that would drop them.
-- Dynamic DNS is not supported. It needs a domain whose DNS Fastmail hosts.
 
 ## Status
 
